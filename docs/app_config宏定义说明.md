@@ -8,8 +8,8 @@
 |---|---|
 | `CONTROL_PERIOD_MS` | 默认控制周期 |
 | `RACE_TASK4_CONTROL_PERIOD_MS` | 任务四高速控制周期 |
-| `ENABLE_JY62_NAV` | 是否启用 JY62 导航 |
-| `JY62_*` | JY62 上电置零等待和状态打印周期 |
+| `ENABLE_JY62_NAV` | 是否启用 JY61P 航向导航；宏名暂时沿用旧接口 |
+| `JY62_*` | JY61P 上电置零等待和状态打印周期；宏名暂时沿用旧接口 |
 | `TASK_BUTTON_*` | 任务按键防抖与空闲轮询周期 |
 | `ST011_ACTIVE_LOW` | 声光模块触发极性 |
 | `ENCODER_TEST_*` | 可选编码器自检参数 |
@@ -30,7 +30,7 @@
 | `TASK1_STOP_MIN_IR_COUNT` | 终点线最少命中探头数 |
 | `TASK1_APPROACH_*` | 接近终点的保守速度参数 |
 | `TASK1_DISTANCE_CORR_*` | 编码器距离修正 |
-| `TASK1_HEADING_*` | JY62 航向修正、滤波、死区和晃动门控 |
+| `TASK1_HEADING_*` | JY61P 航向修正、滤波、死区和晃动门控 |
 
 ## 任务二：A -> B -> C -> D -> A
 

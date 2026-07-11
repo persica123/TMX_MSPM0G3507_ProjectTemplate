@@ -1,6 +1,6 @@
 # SDU NUEDC Training
 
-2026 校赛 F 题自动行驶小车固件。工程基于 TI MSPM0G3507、CCS + SysConfig + DriverLib，控制对象是差速小车、八路红外循迹模块、JY62 惯导、TB6612 电机驱动和 ST011 声光模块。
+2026 校赛 F 题自动行驶小车固件。工程基于 TI MSPM0G3507、CCS + SysConfig + DriverLib，控制对象是差速小车、八路红外/灰度循迹模块、JY61P 姿态传感器、TB6612 电机驱动和 ST011 声光模块。
 
 当前代码已经收敛到验收模式：固件只保留任务一、任务二、任务三、任务四入口。历史调试任务 05/06/07/08/10、Task6/Task8 测试头文件、轮速/红外调试模式入口均已从源码中移除。
 
@@ -23,7 +23,7 @@ UART0 同时支持二进制字节和 ASCII 数字，例如 HEX `03` 或 ASCII `0
 ## 代码结构
 
 ```text
-main.c                 # 系统启动、JY62/编码器/TB6612 初始化、ISR、进入任务调度器
+main.c                 # 系统启动、JY61P/编码器/TB6612 初始化、进入任务调度器
 app_config.h           # 任务一二三四和竞速路径的集中调参入口
 app_control.h          # 限幅、斜坡、PID、角度归一化、航向滤波
 app_motion_utils.h     # 运动相关小工具
@@ -37,7 +37,7 @@ race/race_phase.h      # 竞速阶段状态、点位判定、阶段切换
 race/race_primitives.h # 入弯、出弯、强制找线、航向转向等运动原语
 tasks/task_sequences.h # 任务一/二顶层序列
 tasks/task_dispatcher.h# 任务调度器
-BSP/                   # TB6612、红外、JY62、编码器驱动
+BSP/                   # TB6612、红外/灰度、JY61P、编码器驱动
 Board/                 # UART printf、基础 delay
 docs/                  # 协作文档、调试说明、模块说明
 ```
@@ -85,3 +85,4 @@ gmake -C Debug clean all
 | [docs/串口调试与跑车流程.md](docs/串口调试与跑车流程.md) | 验收版串口命令、跑车流程、日志字段 |
 | [docs/app_config宏定义说明.md](docs/app_config宏定义说明.md) | 当前宏分类说明 |
 | [docs/硬件接线说明.md](docs/硬件接线说明.md) | 当前硬件模块接线和 SysConfig 对应关系 |
+| [docs/JY61P陀螺仪驱动说明.md](docs/JY61P陀螺仪驱动说明.md) | JY61P 接线、I2C 寄存器读取和日志说明 |

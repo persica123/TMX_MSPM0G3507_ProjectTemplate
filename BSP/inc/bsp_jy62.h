@@ -1,89 +1,63 @@
 #ifndef _BSP_JY62_H
 #define _BSP_JY62_H
 
-#include <stdbool.h>
 #include <stdint.h>
 #include "board.h"
 
 /*
- * JY62 串口驱动。
+ * JY61P 三维姿态测量传感器驱动。
  *
- * 接线约定：
- * - JY62 RXD 接 MSPM0 PA08 / UART1_TX
- * - JY62 TXD 接 MSPM0 PA09 / UART1_RX
- * - 当前先按 115200 测试，8 数据位，无校验，1 停止位
- *
- * 协议来自商家 WIT/JY 系列例程：
- * - 帧头固定为 0x55
- * - 0x51 表示加速度帧
- * - 0x52 表示角速度帧
- * - 0x53 表示角度帧
- * - 每帧 11 字节，最后 1 字节为前 10 字节累加和低 8 位
- *
- * 为了方便当前工程直接编译，本驱动采用头文件内 static 实现。
- * 后续如果 CCS 工程文件重新生成并能自动纳入新增 .c 文件，可以再拆成 bsp_jy62.c。
+ * 说明：
+ * - 当前文件保留 JY62_* API 名称，是为了兼容上层已有的直线/弧线控制代码。
+ * - 底层已经按 JY61P 官方例程改为软件 I2C 寄存器读取，不再使用 UART 帧解析。
+ * - 官方例程默认 SCL=PA1、SDA=PA0；本工程 PA0/PA1 已用于 TB6612 PWM，
+ *   因此改用 PA10/PA11：
+ *   JY61P SCL -> MSPM0 PA10
+ *   JY61P SDA -> MSPM0 PA11
  */
 
-#define JY62_UART_BAUD_RATE      (115200U)
-#define JY62_FRAME_HEADER        (0x55U)
-#define JY62_FRAME_ACC           (0x51U)
-#define JY62_FRAME_GYRO          (0x52U)
-#define JY62_FRAME_ANGLE         (0x53U)
-#define JY62_FRAME_LEN           (11U)
-#define JY62_FLAG_ACC            (0x01U)
-#define JY62_FLAG_GYRO           (0x02U)
-#define JY62_FLAG_ANGLE          (0x04U)
-#define JY62_NAV_REQUIRED_FLAGS  (JY62_FLAG_GYRO | JY62_FLAG_ANGLE)
-#define JY62_RAW_DUMP_LEN        (24U)
-#define JY62_GZ_FILTER_NUM       (3)
-#define JY62_GZ_FILTER_DEN       (4)
-#define JY62_UART_ERROR_INTERRUPTS \
-    (DL_UART_MAIN_INTERRUPT_OVERRUN_ERROR | \
-     DL_UART_MAIN_INTERRUPT_BREAK_ERROR | \
-     DL_UART_MAIN_INTERRUPT_PARITY_ERROR | \
-     DL_UART_MAIN_INTERRUPT_FRAMING_ERROR | \
-     DL_UART_MAIN_INTERRUPT_RX_TIMEOUT_ERROR | \
-     DL_UART_MAIN_INTERRUPT_NOISE_ERROR)
-#define JY62_UART_RX_INTERRUPTS \
-    (DL_UART_MAIN_INTERRUPT_RX | JY62_UART_ERROR_INTERRUPTS)
+#define JY61P_I2C_ADDR              (0x50U)
+#define JY61P_REG_UNLOCK            (0x69U)
+#define JY61P_REG_SAVE              (0x00U)
+#define JY61P_REG_ANGLE_REFERENCE   (0x01U)
+#define JY61P_REG_ROLL_L            (0x3DU)
+#define JY61P_READ_ANGLE_LEN        (6U)
+#define JY61P_I2C_WAIT_ACK_LIMIT    (50U)
+#define JY61P_GZ_FILTER_NUM         (3)
+#define JY61P_GZ_FILTER_DEN         (4)
 
-/**
- * @brief JY62 原始解码帧、解析器状态和统计计数。
- */
+/* 兼容旧日志字段；JY61P 当前不走 UART。 */
+#define JY62_UART_BAUD_RATE         (0U)
+
 typedef struct {
-    int16_t acc_raw[3];       /* 原始加速度：换算为 g 时 raw / 32768 * 16。 */
-    int16_t gyro_raw[3];      /* 原始角速度：换算为 deg/s 时 raw / 32768 * 2000。 */
-    int16_t angle_raw[3];     /* 原始角度：换算为 deg 时 raw / 32768 * 180。 */
-    int16_t aux_raw;          /* 每帧第 4 个 int16：0x51 为温度，0x52 为电压，0x53 为版本/无效值。 */
-    uint8_t update_flags;     /* 本次读到的新数据类型，见 JY62_FLAG_*。 */
-    uint8_t received_flags;   /* 上电以来已经收到过的数据类型，不会被 JY62_Poll 清零。 */
-    uint8_t last_frame_type;  /* 最近一次校验通过的帧类型。 */
-    uint8_t raw_count;        /* recent_raw 中当前有效的字节数量。 */
-    uint8_t raw_write_index;  /* recent_raw 的环形写入位置。 */
-    uint8_t recent_raw[JY62_RAW_DUMP_LEN]; /* 最近收到的原始字节，用于排查波特率和协议。 */
-    uint32_t header_count;    /* 收到 0x55 帧头的累计数量。 */
-    uint32_t frame_count;     /* 校验通过且属于 0x51/0x52/0x53 的姿态帧累计数量。 */
-    uint32_t unknown_frame_count; /* 校验通过但不是姿态帧的累计数量。 */
-    uint32_t checksum_error;  /* 校验失败累计数量。 */
-    uint32_t rx_byte_count;   /* UART1 收到的字节累计数量。 */
-    uint32_t rx_irq_count;    /* UART1 接收中断累计次数，用于确认中断接收是否工作。 */
-    uint32_t uart_error_count; /* UART1 硬件错误累计次数，常见原因是线序、波特率或 FIFO 溢出。 */
-    uint32_t overrun_count;   /* UART1 FIFO 溢出累计次数，非 0 说明主循环轮询接收来不及。 */
+    int16_t angle_raw[3];      /* Roll/Pitch/Yaw 原始角度，换算为 deg 时 raw / 32768 * 180。 */
+    uint8_t update_flags;
+    uint8_t received_flags;
+    uint8_t last_frame_type;
+    uint8_t raw_count;
+    uint8_t raw_write_index;
+    uint8_t recent_raw[JY61P_READ_ANGLE_LEN];
+    uint32_t header_count;
+    uint32_t frame_count;
+    uint32_t unknown_frame_count;
+    uint32_t checksum_error;
+    uint32_t rx_byte_count;
+    uint32_t rx_irq_count;
+    uint32_t uart_error_count;
+    uint32_t overrun_count;
+    uint32_t i2c_error_count;
 } jy62_sample_t;
 
-/**
- * @brief 小车控制代码使用的 JY62 导航友好输出。
- */
 typedef struct {
-    int32_t yaw_cdeg;             /* 原始偏航角，单位 0.01 度，范围约为 -18000 到 +18000。 */
-    int32_t yaw_relative_cdeg;    /* 以上电后第一次有效 yaw 为零点的相对偏航角，单位 0.01 度。 */
-    int32_t yaw_zero_cdeg;        /* 软件零点，单位 0.01 度。 */
-    int32_t gyro_z_mdps;          /* Z 轴角速度，单位 0.001 度/秒。 */
-    int32_t gyro_z_filtered_mdps; /* 低通后的 Z 轴角速度，后续可作为转向阻尼项。 */
-    int32_t roll_cdeg;            /* 滚转角，仅用于观察模块安装状态。 */
-    int32_t pitch_cdeg;           /* 俯仰角，仅用于观察模块安装状态。 */
-    uint8_t valid;                /* 已收到角速度帧和角度帧时为 1。 */
-    uint8_t update_flags;         /* 本次读取周期内更新过的数据类型。 */
+    int32_t yaw_cdeg;
+    int32_t yaw_relative_cdeg;
+    int32_t yaw_zero_cdeg;
+    int32_t gyro_z_mdps;
+    int32_t gyro_z_filtered_mdps;
+    int32_t roll_cdeg;
+    int32_t pitch_cdeg;
+    uint8_t valid;
+    uint8_t update_flags;
     uint32_t rx_byte_count;
     uint32_t header_count;
     uint32_t frame_count;
@@ -92,72 +66,237 @@ typedef struct {
     uint32_t overrun_count;
 } jy62_navigation_t;
 
-static uint8_t g_jy62_frame[JY62_FRAME_LEN];
-static uint8_t g_jy62_frame_index;
-static uint32_t g_jy62_last_poll_frame_count;
-static int32_t g_jy62_yaw_zero_cdeg;
-static int32_t g_jy62_gyro_z_filtered_raw;
-static uint8_t g_jy62_yaw_zero_valid;
-static uint8_t g_jy62_gyro_z_filter_valid;
-static jy62_sample_t g_jy62_sample;
+static jy62_sample_t g_jy61p_sample;
+static int32_t g_jy61p_yaw_zero_cdeg;
+static uint8_t g_jy61p_yaw_zero_valid;
+static uint32_t g_jy61p_last_poll_count;
+static int32_t g_jy61p_gyro_z_filtered_mdps;
+static uint8_t g_jy61p_gyro_z_filter_valid;
 
-/**
- * @brief 将小端帧字节转换为有符号 int16。
- */
-static int16_t JY62_MakeI16(uint8_t low, uint8_t high)
+static void JY61P_SdaOut(void)
+{
+    DL_GPIO_initDigitalOutput(JY61P_IIC_SDA_IOMUX);
+    DL_GPIO_setPins(JY61P_IIC_PORT, JY61P_IIC_SDA_PIN);
+    DL_GPIO_enableOutput(JY61P_IIC_PORT, JY61P_IIC_SDA_PIN);
+}
+
+static void JY61P_SdaIn(void)
+{
+    DL_GPIO_initDigitalInput(JY61P_IIC_SDA_IOMUX);
+}
+
+static void JY61P_WriteScl(uint8_t level)
+{
+    if (level != 0U) {
+        DL_GPIO_setPins(JY61P_IIC_PORT, JY61P_IIC_SCL_PIN);
+    } else {
+        DL_GPIO_clearPins(JY61P_IIC_PORT, JY61P_IIC_SCL_PIN);
+    }
+}
+
+static void JY61P_WriteSda(uint8_t level)
+{
+    if (level != 0U) {
+        DL_GPIO_setPins(JY61P_IIC_PORT, JY61P_IIC_SDA_PIN);
+    } else {
+        DL_GPIO_clearPins(JY61P_IIC_PORT, JY61P_IIC_SDA_PIN);
+    }
+}
+
+static uint8_t JY61P_ReadSda(void)
+{
+    return ((DL_GPIO_readPins(JY61P_IIC_PORT, JY61P_IIC_SDA_PIN) & JY61P_IIC_SDA_PIN) != 0U) ? 1U : 0U;
+}
+
+static void JY61P_Start(void)
+{
+    JY61P_SdaOut();
+    JY61P_WriteScl(0U);
+    JY61P_WriteSda(1U);
+    JY61P_WriteScl(1U);
+    delay_us(5);
+    JY61P_WriteSda(0U);
+    delay_us(5);
+    JY61P_WriteScl(0U);
+    delay_us(5);
+}
+
+static void JY61P_Stop(void)
+{
+    JY61P_SdaOut();
+    JY61P_WriteScl(0U);
+    JY61P_WriteSda(0U);
+    JY61P_WriteScl(1U);
+    delay_us(5);
+    JY61P_WriteSda(1U);
+    delay_us(5);
+}
+
+static void JY61P_SendAck(uint8_t nack)
+{
+    JY61P_SdaOut();
+    JY61P_WriteScl(0U);
+    JY61P_WriteSda((nack == 0U) ? 0U : 1U);
+    delay_us(5);
+    JY61P_WriteScl(1U);
+    delay_us(5);
+    JY61P_WriteScl(0U);
+    JY61P_WriteSda(1U);
+}
+
+static uint8_t JY61P_WaitAck(void)
+{
+    uint8_t wait_count = JY61P_I2C_WAIT_ACK_LIMIT;
+
+    JY61P_SdaIn();
+    JY61P_WriteSda(1U);
+
+    while ((JY61P_ReadSda() != 0U) && (wait_count != 0U)) {
+        wait_count--;
+        delay_us(5);
+    }
+
+    if (wait_count == 0U) {
+        JY61P_Stop();
+        JY61P_SdaOut();
+        return 0U;
+    }
+
+    JY61P_WriteScl(1U);
+    delay_us(5);
+    JY61P_WriteScl(0U);
+    JY61P_SdaOut();
+    return 1U;
+}
+
+static void JY61P_SendByte(uint8_t data)
+{
+    uint8_t index;
+
+    JY61P_SdaOut();
+    JY61P_WriteScl(0U);
+
+    for (index = 0U; index < 8U; index++) {
+        JY61P_WriteSda((uint8_t)((data & 0x80U) >> 7U));
+        delay_us(2);
+        JY61P_WriteScl(1U);
+        delay_us(5);
+        JY61P_WriteScl(0U);
+        delay_us(5);
+        data <<= 1U;
+    }
+}
+
+static uint8_t JY61P_ReadByte(void)
+{
+    uint8_t index;
+    uint8_t data = 0U;
+
+    JY61P_SdaIn();
+
+    for (index = 0U; index < 8U; index++) {
+        JY61P_WriteScl(0U);
+        delay_us(5);
+        JY61P_WriteScl(1U);
+        delay_us(5);
+        data <<= 1U;
+        if (JY61P_ReadSda() != 0U) {
+            data |= 1U;
+        }
+        delay_us(5);
+    }
+
+    JY61P_SdaOut();
+    return data;
+}
+
+static uint8_t JY61P_WriteData(uint8_t reg, const uint8_t *data, uint32_t length)
+{
+    uint32_t index;
+
+    JY61P_Start();
+    JY61P_SendByte((uint8_t)(JY61P_I2C_ADDR << 1U));
+    if (JY61P_WaitAck() == 0U) {
+        return 0U;
+    }
+
+    JY61P_SendByte(reg);
+    if (JY61P_WaitAck() == 0U) {
+        return 0U;
+    }
+
+    for (index = 0U; index < length; index++) {
+        JY61P_SendByte(data[index]);
+        if (JY61P_WaitAck() == 0U) {
+            return 0U;
+        }
+    }
+
+    JY61P_Stop();
+    return 1U;
+}
+
+static uint8_t JY61P_ReadData(uint8_t reg, uint8_t *data, uint32_t length)
+{
+    uint32_t index;
+
+    if ((data == 0) || (length == 0U)) {
+        return 0U;
+    }
+
+    JY61P_Start();
+    JY61P_SendByte((uint8_t)(JY61P_I2C_ADDR << 1U));
+    if (JY61P_WaitAck() == 0U) {
+        return 0U;
+    }
+
+    JY61P_SendByte(reg);
+    if (JY61P_WaitAck() == 0U) {
+        return 0U;
+    }
+
+    delay_us(5);
+    JY61P_Start();
+    JY61P_SendByte((uint8_t)((JY61P_I2C_ADDR << 1U) | 1U));
+    if (JY61P_WaitAck() == 0U) {
+        return 0U;
+    }
+
+    for (index = 0U; index < length; index++) {
+        data[index] = JY61P_ReadByte();
+        JY61P_SendAck((index == (length - 1U)) ? 1U : 0U);
+    }
+
+    JY61P_Stop();
+    return 1U;
+}
+
+static int16_t JY61P_MakeI16(uint8_t low, uint8_t high)
 {
     return (int16_t)((uint16_t)low | ((uint16_t)high << 8));
 }
 
-/**
- * @brief JY62 计算使用的绝对值辅助函数。
- */
 static int32_t JY62_Abs32(int32_t value)
 {
     return (value < 0) ? -value : value;
 }
 
-/**
- * @brief 将原始加速度转换为 milli-g。
- */
-static int32_t JY62_RawToAccMg(int16_t raw)
-{
-    return (int32_t)(((int64_t)raw * 16000LL) / 32768LL);
-}
-
-/**
- * @brief 将原始陀螺仪读数转换为 milli-degree/s。
- */
-static int32_t JY62_RawToGyroMdps(int16_t raw)
-{
-    return (int32_t)(((int64_t)raw * 2000000LL) / 32768LL);
-}
-
-/**
- * @brief 将原始角度读数转换为百分之一度。
- */
 static int32_t JY62_RawToAngleCdeg(int16_t raw)
 {
     return (int32_t)(((int64_t)raw * 18000LL) / 32768LL);
 }
 
-/**
- * @brief 将百分之一度角度归一化到正负 180 度范围。
- */
 static int32_t JY62_NormalizeAngleCdeg(int32_t angle_cdeg)
 {
-    if (angle_cdeg > 18000L) {
+    while (angle_cdeg > 18000L) {
         angle_cdeg -= 36000L;
-    } else if (angle_cdeg < -18000L) {
+    }
+    while (angle_cdeg < -18000L) {
         angle_cdeg += 36000L;
     }
-
     return angle_cdeg;
 }
 
-/**
- * @brief 不使用浮点数打印带符号定点数。
- */
 static void JY62_PrintSignedFixed(int32_t value, uint16_t scale, uint8_t digits)
 {
     int32_t abs_value = JY62_Abs32(value);
@@ -175,468 +314,195 @@ static void JY62_PrintSignedFixed(int32_t value, uint16_t scale, uint8_t digits)
     }
 }
 
-/**
- * @brief 校验 JY62 10 字节帧的累加和。
- */
-static uint8_t JY62_ChecksumOk(const uint8_t *frame)
+static uint8_t JY61P_ReadAngles(void)
 {
-    uint8_t sum = 0U;
-    uint8_t index;
+    uint8_t data[JY61P_READ_ANGLE_LEN] = {0U};
+    uint8_t ok;
+    int32_t yaw_now_cdeg;
+    int32_t yaw_delta_cdeg;
+    int32_t gyro_est_mdps = 0;
+    static int32_t last_yaw_cdeg;
+    static uint8_t last_yaw_valid;
 
-    for (index = 0U; index < (JY62_FRAME_LEN - 1U); index++) {
-        sum = (uint8_t)(sum + frame[index]);
+    ok = JY61P_ReadData(JY61P_REG_ROLL_L, data, JY61P_READ_ANGLE_LEN);
+    if (ok == 0U) {
+        g_jy61p_sample.i2c_error_count++;
+        return 0U;
     }
 
-    return (sum == frame[JY62_FRAME_LEN - 1U]) ? 1U : 0U;
+    g_jy61p_sample.angle_raw[0] = JY61P_MakeI16(data[0], data[1]);
+    g_jy61p_sample.angle_raw[1] = JY61P_MakeI16(data[2], data[3]);
+    g_jy61p_sample.angle_raw[2] = JY61P_MakeI16(data[4], data[5]);
+    g_jy61p_sample.update_flags = 0x04U;
+    g_jy61p_sample.received_flags = 0x04U;
+    g_jy61p_sample.last_frame_type = 0x53U;
+    g_jy61p_sample.frame_count++;
+    g_jy61p_sample.rx_byte_count += JY61P_READ_ANGLE_LEN;
+    g_jy61p_sample.raw_count = JY61P_READ_ANGLE_LEN;
+    g_jy61p_sample.raw_write_index = 0U;
+
+    for (uint8_t index = 0U; index < JY61P_READ_ANGLE_LEN; index++) {
+        g_jy61p_sample.recent_raw[index] = data[index];
+    }
+
+    yaw_now_cdeg = JY62_RawToAngleCdeg(g_jy61p_sample.angle_raw[2]);
+    if (last_yaw_valid != 0U) {
+        yaw_delta_cdeg = JY62_NormalizeAngleCdeg(yaw_now_cdeg - last_yaw_cdeg);
+        gyro_est_mdps = yaw_delta_cdeg * 1000L;
+    }
+    last_yaw_cdeg = yaw_now_cdeg;
+    last_yaw_valid = 1U;
+
+    if (g_jy61p_gyro_z_filter_valid == 0U) {
+        g_jy61p_gyro_z_filtered_mdps = gyro_est_mdps;
+        g_jy61p_gyro_z_filter_valid = 1U;
+    } else {
+        g_jy61p_gyro_z_filtered_mdps =
+            ((g_jy61p_gyro_z_filtered_mdps * JY61P_GZ_FILTER_NUM) +
+            (gyro_est_mdps * (JY61P_GZ_FILTER_DEN - JY61P_GZ_FILTER_NUM))) /
+            JY61P_GZ_FILTER_DEN;
+    }
+
+    if (g_jy61p_yaw_zero_valid == 0U) {
+        g_jy61p_yaw_zero_cdeg = yaw_now_cdeg;
+        g_jy61p_yaw_zero_valid = 1U;
+    }
+
+    return 1U;
 }
 
-/**
- * @brief 在错误帧或半帧后恢复解析器对齐。
- */
-static void JY62_ResyncFrame(void)
+static void JY61P_ZeroHardware(void)
 {
-    uint8_t next_header_index;
-    uint8_t index;
+    const uint8_t unlock_reg[2] = {0x88U, 0xB5U};
+    const uint8_t z_axis_zero_reg[2] = {0x04U, 0x00U};
+    const uint8_t angle_zero_reg[2] = {0x08U, 0x00U};
+    const uint8_t save_reg[2] = {0x00U, 0x00U};
 
-    for (next_header_index = 1U; next_header_index < JY62_FRAME_LEN; next_header_index++) {
-        if (g_jy62_frame[next_header_index] == JY62_FRAME_HEADER) {
-            break;
-        }
-    }
+    (void)JY61P_WriteData(JY61P_REG_UNLOCK, unlock_reg, 2U);
+    delay_ms(200);
+    (void)JY61P_WriteData(JY61P_REG_ANGLE_REFERENCE, z_axis_zero_reg, 2U);
+    delay_ms(200);
+    (void)JY61P_WriteData(JY61P_REG_SAVE, save_reg, 2U);
+    delay_ms(200);
 
-    if (next_header_index >= JY62_FRAME_LEN) {
-        g_jy62_frame_index = 0U;
-        return;
-    }
-
-    g_jy62_frame_index = (uint8_t)(JY62_FRAME_LEN - next_header_index);
-    for (index = 0U; index < g_jy62_frame_index; index++) {
-        g_jy62_frame[index] = g_jy62_frame[next_header_index + index];
-    }
+    (void)JY61P_WriteData(JY61P_REG_UNLOCK, unlock_reg, 2U);
+    delay_ms(200);
+    (void)JY61P_WriteData(JY61P_REG_ANGLE_REFERENCE, angle_zero_reg, 2U);
+    delay_ms(200);
+    (void)JY61P_WriteData(JY61P_REG_SAVE, save_reg, 2U);
+    delay_ms(200);
 }
 
-/**
- * @brief 保存最近原始字节，用于 UART 和协议诊断。
- */
-static void JY62_SaveRecentByte(uint8_t data)
-{
-    g_jy62_sample.recent_raw[g_jy62_sample.raw_write_index] = data;
-    g_jy62_sample.raw_write_index++;
-    if (g_jy62_sample.raw_write_index >= JY62_RAW_DUMP_LEN) {
-        g_jy62_sample.raw_write_index = 0U;
-    }
-
-    if (g_jy62_sample.raw_count < JY62_RAW_DUMP_LEN) {
-        g_jy62_sample.raw_count++;
-    }
-}
-
-/**
- * @brief 将一帧校验通过的 JY62 数据解码到采样缓存。
- */
-static void JY62_ParseFrame(const uint8_t *frame)
-{
-    int16_t value0 = JY62_MakeI16(frame[2], frame[3]);
-    int16_t value1 = JY62_MakeI16(frame[4], frame[5]);
-    int16_t value2 = JY62_MakeI16(frame[6], frame[7]);
-    int16_t value3 = JY62_MakeI16(frame[8], frame[9]);
-
-    g_jy62_sample.last_frame_type = frame[1];
-
-    switch (frame[1]) {
-    case JY62_FRAME_ACC:
-        g_jy62_sample.acc_raw[0] = value0;
-        g_jy62_sample.acc_raw[1] = value1;
-        g_jy62_sample.acc_raw[2] = value2;
-        g_jy62_sample.aux_raw = value3;
-        g_jy62_sample.update_flags |= JY62_FLAG_ACC;
-        g_jy62_sample.received_flags |= JY62_FLAG_ACC;
-        g_jy62_sample.frame_count++;
-        break;
-
-    case JY62_FRAME_GYRO:
-        g_jy62_sample.gyro_raw[0] = value0;
-        g_jy62_sample.gyro_raw[1] = value1;
-        g_jy62_sample.gyro_raw[2] = value2;
-        g_jy62_sample.aux_raw = value3;
-        if (g_jy62_gyro_z_filter_valid == 0U) {
-            g_jy62_gyro_z_filtered_raw = value2;
-            g_jy62_gyro_z_filter_valid = 1U;
-        } else {
-            g_jy62_gyro_z_filtered_raw =
-                ((g_jy62_gyro_z_filtered_raw * JY62_GZ_FILTER_NUM) +
-                ((int32_t)value2 * (JY62_GZ_FILTER_DEN - JY62_GZ_FILTER_NUM))) /
-                JY62_GZ_FILTER_DEN;
-        }
-        g_jy62_sample.update_flags |= JY62_FLAG_GYRO;
-        g_jy62_sample.received_flags |= JY62_FLAG_GYRO;
-        g_jy62_sample.frame_count++;
-        break;
-
-    case JY62_FRAME_ANGLE:
-        g_jy62_sample.angle_raw[0] = value0;
-        g_jy62_sample.angle_raw[1] = value1;
-        g_jy62_sample.angle_raw[2] = value2;
-        g_jy62_sample.aux_raw = value3;
-        if (g_jy62_yaw_zero_valid == 0U) {
-            g_jy62_yaw_zero_cdeg = JY62_RawToAngleCdeg(value2);
-            g_jy62_yaw_zero_valid = 1U;
-        }
-        g_jy62_sample.update_flags |= JY62_FLAG_ANGLE;
-        g_jy62_sample.received_flags |= JY62_FLAG_ANGLE;
-        g_jy62_sample.frame_count++;
-        break;
-
-    default:
-        g_jy62_sample.unknown_frame_count++;
-        break;
-    }
-}
-
-/**
- * @brief 将一个 UART 字节送入 JY62 帧解析器。
- */
-static void JY62_PushByte(uint8_t data)
-{
-    g_jy62_sample.rx_byte_count++;
-    JY62_SaveRecentByte(data);
-
-    if (data == JY62_FRAME_HEADER) {
-        g_jy62_sample.header_count++;
-    }
-
-    if (g_jy62_frame_index == 0U) {
-        if (data != JY62_FRAME_HEADER) {
-            return;
-        }
-        g_jy62_frame[g_jy62_frame_index++] = data;
-        return;
-    }
-
-    g_jy62_frame[g_jy62_frame_index++] = data;
-
-    if (g_jy62_frame_index >= JY62_FRAME_LEN) {
-        if (JY62_ChecksumOk(g_jy62_frame) != 0U) {
-            JY62_ParseFrame(g_jy62_frame);
-            g_jy62_frame_index = 0U;
-        } else {
-            g_jy62_sample.checksum_error++;
-            JY62_ResyncFrame();
-        }
-    }
-}
-
-/**
- * @brief 清空 UART1 RX FIFO，并把每个字节送入解析器。
- */
-static void JY62_DrainRxFifo(void)
-{
-    while (DL_UART_Main_isRXFIFOEmpty(UART_1_INST) == false) {
-        JY62_PushByte(DL_UART_Main_receiveData(UART_1_INST));
-    }
-}
-
-/**
- * @brief 记录 UART1 硬件错误计数。
- */
-static void JY62_RecordUartError(uint8_t is_overrun)
-{
-    g_jy62_sample.uart_error_count++;
-    if (is_overrun != 0U) {
-        g_jy62_sample.overrun_count++;
-    }
-}
-
-/**
- * @brief 使能 JY62 使用的 UART1 接收和错误中断。
- */
-static void JY62_EnableRxInterrupt(void)
-{
-    /*
-     * JY62 在 115200 下会连续输出二进制帧。
-     * 如果只靠主循环轮询，UART0 打印较长日志时容易让 UART1 FIFO 溢出。
-     * 因此这里把 RX 阈值设为 1 字节，并打开 UART1 中断，收到字节就立刻解析。
-     */
-    DL_UART_Main_disableInterrupt(UART_1_INST, JY62_UART_RX_INTERRUPTS);
-    DL_UART_Main_setRXFIFOThreshold(UART_1_INST, DL_UART_MAIN_RX_FIFO_LEVEL_ONE_ENTRY);
-    DL_UART_Main_setRXInterruptTimeout(UART_1_INST, 1U);
-    DL_UART_Main_clearInterruptStatus(UART_1_INST, JY62_UART_RX_INTERRUPTS);
-    JY62_DrainRxFifo();
-    NVIC_ClearPendingIRQ(UART_1_INST_INT_IRQN);
-    DL_UART_Main_enableInterrupt(UART_1_INST, JY62_UART_RX_INTERRUPTS);
-    NVIC_EnableIRQ(UART_1_INST_INT_IRQN);
-}
-
-/**
- * @brief 复位解析器/缓存状态，并开启 JY62 UART 接收。
- */
 static void JY62_Init(void)
 {
-    uint8_t index;
-
-    g_jy62_frame_index = 0U;
-    g_jy62_last_poll_frame_count = 0U;
-    g_jy62_yaw_zero_cdeg = 0;
-    g_jy62_gyro_z_filtered_raw = 0;
-    g_jy62_yaw_zero_valid = 0U;
-    g_jy62_gyro_z_filter_valid = 0U;
-    g_jy62_sample.update_flags = 0U;
-    g_jy62_sample.received_flags = 0U;
-    g_jy62_sample.last_frame_type = 0U;
-    g_jy62_sample.raw_count = 0U;
-    g_jy62_sample.raw_write_index = 0U;
-    g_jy62_sample.header_count = 0U;
-    g_jy62_sample.frame_count = 0U;
-    g_jy62_sample.unknown_frame_count = 0U;
-    g_jy62_sample.checksum_error = 0U;
-    g_jy62_sample.rx_byte_count = 0U;
-    g_jy62_sample.rx_irq_count = 0U;
-    g_jy62_sample.uart_error_count = 0U;
-    g_jy62_sample.overrun_count = 0U;
-    g_jy62_sample.aux_raw = 0;
-
-    for (index = 0U; index < 3U; index++) {
-        g_jy62_sample.acc_raw[index] = 0;
-        g_jy62_sample.gyro_raw[index] = 0;
-        g_jy62_sample.angle_raw[index] = 0;
+    for (uint8_t index = 0U; index < 3U; index++) {
+        g_jy61p_sample.angle_raw[index] = 0;
+    }
+    for (uint8_t index = 0U; index < JY61P_READ_ANGLE_LEN; index++) {
+        g_jy61p_sample.recent_raw[index] = 0U;
     }
 
-    for (index = 0U; index < JY62_RAW_DUMP_LEN; index++) {
-        g_jy62_sample.recent_raw[index] = 0U;
-    }
+    g_jy61p_sample.update_flags = 0U;
+    g_jy61p_sample.received_flags = 0U;
+    g_jy61p_sample.last_frame_type = 0U;
+    g_jy61p_sample.raw_count = 0U;
+    g_jy61p_sample.raw_write_index = 0U;
+    g_jy61p_sample.header_count = 0U;
+    g_jy61p_sample.frame_count = 0U;
+    g_jy61p_sample.unknown_frame_count = 0U;
+    g_jy61p_sample.checksum_error = 0U;
+    g_jy61p_sample.rx_byte_count = 0U;
+    g_jy61p_sample.rx_irq_count = 0U;
+    g_jy61p_sample.uart_error_count = 0U;
+    g_jy61p_sample.overrun_count = 0U;
+    g_jy61p_sample.i2c_error_count = 0U;
+    g_jy61p_yaw_zero_cdeg = 0;
+    g_jy61p_yaw_zero_valid = 0U;
+    g_jy61p_last_poll_count = 0U;
+    g_jy61p_gyro_z_filtered_mdps = 0;
+    g_jy61p_gyro_z_filter_valid = 0U;
 
-    JY62_EnableRxInterrupt();
+    JY61P_SdaOut();
+    JY61P_WriteScl(1U);
+    JY61P_WriteSda(1U);
+    JY61P_ZeroHardware();
+    (void)JY61P_ReadAngles();
 }
 
-/**
- * @brief 将累计解析器状态轮询为原始采样快照。
- */
-static uint32_t JY62_Poll(jy62_sample_t *sample)
-{
-    uint32_t frame_delta;
-
-    __disable_irq();
-    if (sample != 0) {
-        *sample = g_jy62_sample;
-        g_jy62_sample.update_flags = 0U;
-    }
-    frame_delta = g_jy62_sample.frame_count - g_jy62_last_poll_frame_count;
-    g_jy62_last_poll_frame_count = g_jy62_sample.frame_count;
-    __enable_irq();
-
-    return frame_delta;
-}
-
-/**
- * @brief 角度数据有效时，将当前 yaw 设置为软件零点。
- */
 static void JY62_SetYawZeroToCurrent(void)
 {
-    __disable_irq();
-    g_jy62_yaw_zero_cdeg = JY62_RawToAngleCdeg(g_jy62_sample.angle_raw[2]);
-    g_jy62_yaw_zero_valid = 1U;
-    __enable_irq();
+    if (JY61P_ReadAngles() != 0U) {
+        g_jy61p_yaw_zero_cdeg = JY62_RawToAngleCdeg(g_jy61p_sample.angle_raw[2]);
+        g_jy61p_yaw_zero_valid = 1U;
+    }
 }
 
-/**
- * @brief 轮询并转换 JY62 数据，生成控制器使用的导航字段。
- */
 static uint32_t JY62_GetNavigation(jy62_navigation_t *nav)
 {
-    jy62_sample_t sample;
-    int32_t gyro_z_filtered_raw;
-    int32_t yaw_zero_cdeg;
+    uint32_t before = g_jy61p_sample.frame_count;
     uint32_t frame_delta;
-    uint8_t yaw_zero_valid;
+    uint8_t ok;
+    int32_t yaw_cdeg;
 
-    __disable_irq();
-    sample = g_jy62_sample;
-    gyro_z_filtered_raw = g_jy62_gyro_z_filtered_raw;
-    yaw_zero_cdeg = g_jy62_yaw_zero_cdeg;
-    yaw_zero_valid = g_jy62_yaw_zero_valid;
-    g_jy62_sample.update_flags = 0U;
-    frame_delta = g_jy62_sample.frame_count - g_jy62_last_poll_frame_count;
-    g_jy62_last_poll_frame_count = g_jy62_sample.frame_count;
-    __enable_irq();
+    ok = JY61P_ReadAngles();
+    frame_delta = g_jy61p_sample.frame_count - g_jy61p_last_poll_count;
+    g_jy61p_last_poll_count = g_jy61p_sample.frame_count;
 
     if (nav != 0) {
-        nav->yaw_cdeg = JY62_RawToAngleCdeg(sample.angle_raw[2]);
-        nav->yaw_zero_cdeg = yaw_zero_cdeg;
-        nav->yaw_relative_cdeg = JY62_NormalizeAngleCdeg(nav->yaw_cdeg - yaw_zero_cdeg);
-        nav->gyro_z_mdps = JY62_RawToGyroMdps(sample.gyro_raw[2]);
-        nav->gyro_z_filtered_mdps = JY62_RawToGyroMdps((int16_t)gyro_z_filtered_raw);
-        nav->roll_cdeg = JY62_RawToAngleCdeg(sample.angle_raw[0]);
-        nav->pitch_cdeg = JY62_RawToAngleCdeg(sample.angle_raw[1]);
-        nav->valid = (((sample.received_flags & JY62_NAV_REQUIRED_FLAGS) == JY62_NAV_REQUIRED_FLAGS) &&
-            (yaw_zero_valid != 0U)) ? 1U : 0U;
-        nav->update_flags = sample.update_flags;
-        nav->rx_byte_count = sample.rx_byte_count;
-        nav->header_count = sample.header_count;
-        nav->frame_count = sample.frame_count;
-        nav->checksum_error = sample.checksum_error;
-        nav->uart_error_count = sample.uart_error_count;
-        nav->overrun_count = sample.overrun_count;
+        yaw_cdeg = JY62_RawToAngleCdeg(g_jy61p_sample.angle_raw[2]);
+        nav->yaw_cdeg = yaw_cdeg;
+        nav->yaw_zero_cdeg = g_jy61p_yaw_zero_cdeg;
+        nav->yaw_relative_cdeg = JY62_NormalizeAngleCdeg(yaw_cdeg - g_jy61p_yaw_zero_cdeg);
+        nav->gyro_z_mdps = g_jy61p_gyro_z_filtered_mdps;
+        nav->gyro_z_filtered_mdps = g_jy61p_gyro_z_filtered_mdps;
+        nav->roll_cdeg = JY62_RawToAngleCdeg(g_jy61p_sample.angle_raw[0]);
+        nav->pitch_cdeg = JY62_RawToAngleCdeg(g_jy61p_sample.angle_raw[1]);
+        nav->valid = ((ok != 0U) && (g_jy61p_yaw_zero_valid != 0U)) ? 1U : 0U;
+        nav->update_flags = g_jy61p_sample.update_flags;
+        nav->rx_byte_count = g_jy61p_sample.rx_byte_count;
+        nav->header_count = g_jy61p_sample.header_count;
+        nav->frame_count = g_jy61p_sample.frame_count;
+        nav->checksum_error = g_jy61p_sample.i2c_error_count;
+        nav->uart_error_count = 0U;
+        nav->overrun_count = 0U;
     }
 
-    return frame_delta;
+    return (g_jy61p_sample.frame_count != before) ? frame_delta : 0U;
 }
 
-/**
- * @brief 读取导航字段，但不重置更新帧计数。
- */
 static uint8_t JY62_PeekNavigation(jy62_navigation_t *nav)
 {
-    jy62_sample_t sample;
-    int32_t gyro_z_filtered_raw;
-    int32_t yaw_zero_cdeg;
-    uint8_t yaw_zero_valid;
-
-    __disable_irq();
-    sample = g_jy62_sample;
-    gyro_z_filtered_raw = g_jy62_gyro_z_filtered_raw;
-    yaw_zero_cdeg = g_jy62_yaw_zero_cdeg;
-    yaw_zero_valid = g_jy62_yaw_zero_valid;
-    __enable_irq();
-
-    if (nav != 0) {
-        nav->yaw_cdeg = JY62_RawToAngleCdeg(sample.angle_raw[2]);
-        nav->yaw_zero_cdeg = yaw_zero_cdeg;
-        nav->yaw_relative_cdeg = JY62_NormalizeAngleCdeg(nav->yaw_cdeg - yaw_zero_cdeg);
-        nav->gyro_z_mdps = JY62_RawToGyroMdps(sample.gyro_raw[2]);
-        nav->gyro_z_filtered_mdps = JY62_RawToGyroMdps((int16_t)gyro_z_filtered_raw);
-        nav->roll_cdeg = JY62_RawToAngleCdeg(sample.angle_raw[0]);
-        nav->pitch_cdeg = JY62_RawToAngleCdeg(sample.angle_raw[1]);
-        nav->valid = (((sample.received_flags & JY62_NAV_REQUIRED_FLAGS) == JY62_NAV_REQUIRED_FLAGS) &&
-            (yaw_zero_valid != 0U)) ? 1U : 0U;
-        nav->update_flags = sample.update_flags;
-        nav->rx_byte_count = sample.rx_byte_count;
-        nav->header_count = sample.header_count;
-        nav->frame_count = sample.frame_count;
-        nav->checksum_error = sample.checksum_error;
-        nav->uart_error_count = sample.uart_error_count;
-        nav->overrun_count = sample.overrun_count;
-    }
-
+    (void)JY62_GetNavigation(nav);
     return (nav != 0) ? nav->valid : 0U;
 }
 
-/**
- * @brief main.c 调用的 UART1 中断入口，用于处理 JY62 字节和错误。
- */
-static void JY62_UART1_IRQHandler(void)
-{
-    DL_UART_IIDX pending;
-
-    do {
-        pending = DL_UART_Main_getPendingInterrupt(UART_1_INST);
-
-        switch (pending) {
-        case DL_UART_MAIN_IIDX_RX:
-            g_jy62_sample.rx_irq_count++;
-            JY62_DrainRxFifo();
-            DL_UART_Main_clearInterruptStatus(UART_1_INST, DL_UART_MAIN_INTERRUPT_RX);
-            break;
-
-        case DL_UART_MAIN_IIDX_RX_TIMEOUT_ERROR:
-            g_jy62_sample.rx_irq_count++;
-            JY62_DrainRxFifo();
-            DL_UART_Main_clearInterruptStatus(UART_1_INST, DL_UART_MAIN_INTERRUPT_RX_TIMEOUT_ERROR);
-            break;
-
-        case DL_UART_MAIN_IIDX_OVERRUN_ERROR:
-            JY62_RecordUartError(1U);
-            JY62_DrainRxFifo();
-            DL_UART_Main_clearInterruptStatus(UART_1_INST, DL_UART_MAIN_INTERRUPT_OVERRUN_ERROR);
-            break;
-
-        case DL_UART_MAIN_IIDX_BREAK_ERROR:
-            JY62_RecordUartError(0U);
-            DL_UART_Main_clearInterruptStatus(UART_1_INST, DL_UART_MAIN_INTERRUPT_BREAK_ERROR);
-            break;
-
-        case DL_UART_MAIN_IIDX_PARITY_ERROR:
-            JY62_RecordUartError(0U);
-            DL_UART_Main_clearInterruptStatus(UART_1_INST, DL_UART_MAIN_INTERRUPT_PARITY_ERROR);
-            break;
-
-        case DL_UART_MAIN_IIDX_FRAMING_ERROR:
-            JY62_RecordUartError(0U);
-            DL_UART_Main_clearInterruptStatus(UART_1_INST, DL_UART_MAIN_INTERRUPT_FRAMING_ERROR);
-            break;
-
-        case DL_UART_MAIN_IIDX_NOISE_ERROR:
-            JY62_RecordUartError(0U);
-            DL_UART_Main_clearInterruptStatus(UART_1_INST, DL_UART_MAIN_INTERRUPT_NOISE_ERROR);
-            break;
-
-        default:
-            break;
-        }
-    } while (pending != DL_UART_MAIN_IIDX_NO_INTERRUPT);
-}
-
-/**
- * @brief 打印 JY62 原始解码采样值，用于诊断。
- */
 static void JY62_PrintSample(const jy62_sample_t *sample)
 {
-    int32_t acc_x = JY62_RawToAccMg(sample->acc_raw[0]);
-    int32_t acc_y = JY62_RawToAccMg(sample->acc_raw[1]);
-    int32_t acc_z = JY62_RawToAccMg(sample->acc_raw[2]);
-    int32_t gyro_x = JY62_RawToGyroMdps(sample->gyro_raw[0]);
-    int32_t gyro_y = JY62_RawToGyroMdps(sample->gyro_raw[1]);
-    int32_t gyro_z = JY62_RawToGyroMdps(sample->gyro_raw[2]);
     int32_t roll = JY62_RawToAngleCdeg(sample->angle_raw[0]);
     int32_t pitch = JY62_RawToAngleCdeg(sample->angle_raw[1]);
     int32_t yaw = JY62_RawToAngleCdeg(sample->angle_raw[2]);
 
-    lc_printf("acc_mg=%ld,%ld,%ld gyro_mdps=%ld,%ld,%ld angle_cdeg=%ld,%ld,%ld yaw=",
-        acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, roll, pitch, yaw);
+    lc_printf("jy61p angle_cdeg=%ld,%ld,%ld yaw=", roll, pitch, yaw);
     JY62_PrintSignedFixed(yaw, 100U, 2U);
-    lc_printf(" gz=");
-    JY62_PrintSignedFixed(gyro_z, 1000U, 3U);
 }
 
-/**
- * @brief 打印面向导航控制的 JY62 值，用于诊断。
- */
 static void JY62_PrintNavigation(const jy62_navigation_t *nav)
 {
     lc_printf("ok=%u yaw=", nav->valid);
     JY62_PrintSignedFixed(nav->yaw_cdeg, 100U, 2U);
     lc_printf(" rel=");
     JY62_PrintSignedFixed(nav->yaw_relative_cdeg, 100U, 2U);
-    lc_printf(" gz=");
-    JY62_PrintSignedFixed(nav->gyro_z_mdps, 1000U, 3U);
     lc_printf(" gzlp=");
     JY62_PrintSignedFixed(nav->gyro_z_filtered_mdps, 1000U, 3U);
 }
 
-/**
- * @brief 打印最近原始 UART 字节环形缓冲区。
- */
 static void JY62_PrintRecentRaw(const jy62_sample_t *sample)
 {
-    uint8_t index;
-    uint8_t start;
-
-    if (sample->raw_count == 0U) {
-        lc_printf("none");
-        return;
-    }
-
-    if (sample->raw_count < JY62_RAW_DUMP_LEN) {
-        start = 0U;
-    } else {
-        start = sample->raw_write_index;
-    }
-
-    for (index = 0U; index < sample->raw_count; index++) {
-        uint8_t raw_index = (uint8_t)((start + index) % JY62_RAW_DUMP_LEN);
+    for (uint8_t index = 0U; index < sample->raw_count; index++) {
         if (index != 0U) {
             lc_printf(" ");
         }
-        lc_printf("%02X", sample->recent_raw[raw_index]);
+        lc_printf("%02X", sample->recent_raw[index]);
     }
 }
 

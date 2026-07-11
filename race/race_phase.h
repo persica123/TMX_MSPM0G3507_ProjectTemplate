@@ -22,7 +22,7 @@
 #include "bsp_tb6612.h"
 
 /**
- * @brief 读取 JY62 导航状态，并更新当前阶段的航向进度。
+ * @brief 读取 JY61P 导航状态，并更新当前阶段的航向进度。
  */
 static void race_read_navigation_state(race_context_t *ctx, uint8_t reset_phase)
 {

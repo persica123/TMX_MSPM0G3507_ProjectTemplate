@@ -22,7 +22,7 @@
 #include "bsp_tb6612.h"
 
 /**
- * @brief 从 JY62 读取当前相对航向和滤波后的 Z 轴角速度。
+ * @brief 从 JY61P 读取当前相对航向和滤波后的 Z 轴角速度。
  */
 static uint8_t race_peek_yaw(int32_t *yaw_cdeg, int32_t *gyro_z_filtered_mdps)
 {

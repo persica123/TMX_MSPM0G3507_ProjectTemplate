@@ -31,10 +31,10 @@
 #define STRAIGHT_YAW_CORR_MAX          (18)
 #define STRAIGHT_YAW_GYRO_DAMP_DIVISOR (2600)
 
-/* 生产任务是否启用 JY62 航向导航；置 0 可退化为纯编码器/红外控制。 */
+/* 生产任务是否启用 JY61P 航向导航；置 0 可退化为纯编码器/红外控制。 */
 #define ENABLE_JY62_NAV (1)
 
-/* JY62 上电稳定后再置零；运行中按该周期输出导航诊断。 */
+/* JY61P 上电稳定后再置零；运行中按该周期输出导航诊断。 */
 #define JY62_BOOT_ZERO_DELAY_MS    (300)
 #define JY62_TASK_REPORT_PERIOD_MS (500)
 
@@ -108,7 +108,7 @@
 #define TASK1_APPROACH_B_BASE_PWM (620)
 #define TASK1_APPROACH_A_BASE_PWM (630)
 
-/* 任务一编码器距离修正和 JY62 航向修正。 */
+/* 任务一编码器距离修正和 JY61P 航向修正。 */
 #define TASK1_DISTANCE_CORR_DIVISOR        (16)
 #define TASK1_DISTANCE_CORR_MAX            (45)
 #define TASK1_HEADING_CORR_DIVISOR         (12)

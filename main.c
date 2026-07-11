@@ -9,16 +9,17 @@
 #include "app_services.h"
 #include "app_straight.h"
 #include "app_task_ids.h"
+#include "app_task_mode.h"
 #include "bsp_encoder.h"
 
 /*
  * 验收版固件主流程：
- * 1. 初始化 SysConfig、JY62、编码器和 TB6612。
+ * 1. 初始化 SysConfig、JY61P、编码器和 TB6612。
  * 2. 进入阻塞式任务调度器。
  * 3. 只接受按键或 UART0 命令 01..04 启动任务一到任务四。
  */
 
-/* JY62 相对航向零点建立后置位，避免重复置零。 */
+/* JY61P 相对航向零点建立后置位，避免重复置零。 */
 static uint8_t g_jy62_zero_ready;
 
 /**
@@ -63,7 +64,7 @@ typedef struct {
 #endif
 
 /**
- * @brief 打印一行 JY62 导航诊断信息。
+ * @brief 打印一行 JY61P 导航诊断信息。
  */
 static void jy62_print_navigation_line(const char *mode, uint32_t elapsed_ms)
 {
@@ -77,7 +78,7 @@ static void jy62_print_navigation_line(const char *mode, uint32_t elapsed_ms)
         frame_delta = JY62_GetNavigation(&nav);
     }
 
-    lc_printf("JY62 mode=%s t=%lu df=%lu ok=%u flags=0x%02X yaw_cdeg=%ld rel_cdeg=%ld gz_mdps=%ld gyro_z_filtered_mdps=%ld rx=%lu head=%lu frames=%lu err=%lu/%lu/%lu\r\n",
+    lc_printf("JY61P mode=%s t=%lu df=%lu ok=%u flags=0x%02X yaw_cdeg=%ld rel_cdeg=%ld gz_mdps=%ld gyro_z_filtered_mdps=%ld rx=%lu frames=%lu i2c_err=%lu\r\n",
         mode,
         elapsed_ms,
         frame_delta,
@@ -88,11 +89,8 @@ static void jy62_print_navigation_line(const char *mode, uint32_t elapsed_ms)
         nav.gyro_z_mdps,
         nav.gyro_z_filtered_mdps,
         nav.rx_byte_count,
-        nav.header_count,
         nav.frame_count,
-        nav.checksum_error,
-        nav.uart_error_count,
-        nav.overrun_count);
+        nav.checksum_error);
 #else
     (void)mode;
     (void)elapsed_ms;
@@ -100,7 +98,7 @@ static void jy62_print_navigation_line(const char *mode, uint32_t elapsed_ms)
 }
 
 /**
- * @brief JY62 导航有效时，把当前航向设为相对零点。
+ * @brief JY61P 导航有效时，把当前航向设为相对零点。
  *
  * @return 置零成功返回 1，否则返回 0。
  */
@@ -117,16 +115,13 @@ static uint8_t jy62_zero_to_current(const char *mode, uint32_t elapsed_ms)
         return 1U;
     }
 
-    lc_printf("JY62 mode=%s t=%lu zero=0 ok=%u rx=%lu head=%lu frames=%lu err=%lu/%lu/%lu\r\n",
+    lc_printf("JY61P mode=%s t=%lu zero=0 ok=%u rx=%lu frames=%lu i2c_err=%lu\r\n",
         mode,
         elapsed_ms,
         nav.valid,
         nav.rx_byte_count,
-        nav.header_count,
         nav.frame_count,
-        nav.checksum_error,
-        nav.uart_error_count,
-        nav.overrun_count);
+        nav.checksum_error);
     return 0U;
 #else
     (void)mode;
@@ -159,10 +154,11 @@ static uint8_t race_gyro_turn_to_yaw(
 #include "race/race_laps.h"
 #include "tasks/task_sequences.h"
 #include "tasks/task_dispatcher.h"
+#include "tasks/task_single_test.h"
 
 int main(void)
 {
-    /* SysConfig 初始化时钟、GPIO、PWM、UART、I2C 和中断路由。 */
+    /* SysConfig 初始化时钟、GPIO、PWM、UART 和中断路由。 */
     SYSCFG_DL_init();
     st011_set_active(0U);
     lc_printf("\r\nBOOT: UART OK, IR line follow firmware\r\n");
@@ -170,8 +166,7 @@ int main(void)
 #if ENABLE_JY62_NAV
     JY62_Init();
     g_jy62_zero_ready = 0U;
-    lc_printf("BOOT: JY62 UART1 ready, PA08 TX -> RXD, PA09 RX <- TXD, baud=%lu\r\n",
-        (uint32_t)JY62_UART_BAUD_RATE);
+    lc_printf("BOOT: JY61P I2C ready, PA10 -> SCL, PA11 -> SDA, addr=0x50\r\n");
     delay_ms(JY62_BOOT_ZERO_DELAY_MS);
     (void)jy62_zero_to_current("boot_zero", JY62_BOOT_ZERO_DELAY_MS);
 #endif
@@ -187,9 +182,13 @@ int main(void)
     st011_set_active(0U);
     delay_ms(1000);
 
-    run_task_dispatcher();
+    if (run_single_task_test_if_enabled() == 0U) {
+        run_task_dispatcher();
+    }
 
     while (1) {
+        TB6612_Brake();
+        delay_ms_with_st011(TASK_BUTTON_IDLE_MS);
     }
 }
 
@@ -210,10 +209,3 @@ void GROUP1_IRQHandler(void)
 
     DL_GPIO_clearInterruptStatus(ENCODER_PORT, status);
 }
-
-#if ENABLE_JY62_NAV
-void UART_1_INST_IRQHandler(void)
-{
-    JY62_UART1_IRQHandler();
-}
-#endif
