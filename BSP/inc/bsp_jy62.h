@@ -23,8 +23,19 @@
 #define JY61P_REG_ROLL_L            (0x3DU)
 #define JY61P_READ_ANGLE_LEN        (6U)
 #define JY61P_I2C_WAIT_ACK_LIMIT    (50U)
+#define JY61P_BOOT_DELAY_MS         (500U)
+#define JY61P_HARDWARE_ZERO_ON_BOOT (0U)
 #define JY61P_GZ_FILTER_NUM         (3)
 #define JY61P_GZ_FILTER_DEN         (4)
+
+#define JY61P_STATUS_OK             (0U)
+#define JY61P_STATUS_BUS_STUCK      (1U)
+#define JY61P_STATUS_ADDR_W_NACK    (2U)
+#define JY61P_STATUS_REG_NACK       (3U)
+#define JY61P_STATUS_ADDR_R_NACK    (4U)
+#define JY61P_STATUS_ALL_ZERO       (5U)
+#define JY61P_STATUS_ALL_HIGH       (6U)
+#define JY61P_STATUS_BAD_ARGUMENT   (7U)
 
 /* 兼容旧日志字段；JY61P 当前不走 UART。 */
 #define JY62_UART_BAUD_RATE         (0U)
@@ -36,6 +47,7 @@ typedef struct {
     uint8_t last_frame_type;
     uint8_t raw_count;
     uint8_t raw_write_index;
+    uint8_t i2c_status;
     uint8_t recent_raw[JY61P_READ_ANGLE_LEN];
     uint32_t header_count;
     uint32_t frame_count;
@@ -61,6 +73,7 @@ typedef struct {
     uint32_t rx_byte_count;
     uint32_t header_count;
     uint32_t frame_count;
+    uint8_t i2c_status;
     uint32_t checksum_error;
     uint32_t uart_error_count;
     uint32_t overrun_count;
@@ -73,33 +86,47 @@ static uint32_t g_jy61p_last_poll_count;
 static int32_t g_jy61p_gyro_z_filtered_mdps;
 static uint8_t g_jy61p_gyro_z_filter_valid;
 
-static void JY61P_SdaOut(void)
+static void JY61P_DriveSclLow(void)
+{
+    DL_GPIO_initDigitalOutput(JY61P_IIC_SCL_IOMUX);
+    DL_GPIO_clearPins(JY61P_IIC_PORT, JY61P_IIC_SCL_PIN);
+    DL_GPIO_enableOutput(JY61P_IIC_PORT, JY61P_IIC_SCL_PIN);
+}
+
+static void JY61P_ReleaseScl(void)
+{
+    DL_GPIO_disableOutput(JY61P_IIC_PORT, JY61P_IIC_SCL_PIN);
+    DL_GPIO_initDigitalInput(JY61P_IIC_SCL_IOMUX);
+}
+
+static void JY61P_DriveSdaLow(void)
 {
     DL_GPIO_initDigitalOutput(JY61P_IIC_SDA_IOMUX);
-    DL_GPIO_setPins(JY61P_IIC_PORT, JY61P_IIC_SDA_PIN);
+    DL_GPIO_clearPins(JY61P_IIC_PORT, JY61P_IIC_SDA_PIN);
     DL_GPIO_enableOutput(JY61P_IIC_PORT, JY61P_IIC_SDA_PIN);
 }
 
-static void JY61P_SdaIn(void)
+static void JY61P_ReleaseSda(void)
 {
+    DL_GPIO_disableOutput(JY61P_IIC_PORT, JY61P_IIC_SDA_PIN);
     DL_GPIO_initDigitalInput(JY61P_IIC_SDA_IOMUX);
 }
 
 static void JY61P_WriteScl(uint8_t level)
 {
     if (level != 0U) {
-        DL_GPIO_setPins(JY61P_IIC_PORT, JY61P_IIC_SCL_PIN);
+        JY61P_ReleaseScl();
     } else {
-        DL_GPIO_clearPins(JY61P_IIC_PORT, JY61P_IIC_SCL_PIN);
+        JY61P_DriveSclLow();
     }
 }
 
 static void JY61P_WriteSda(uint8_t level)
 {
     if (level != 0U) {
-        DL_GPIO_setPins(JY61P_IIC_PORT, JY61P_IIC_SDA_PIN);
+        JY61P_ReleaseSda();
     } else {
-        DL_GPIO_clearPins(JY61P_IIC_PORT, JY61P_IIC_SDA_PIN);
+        JY61P_DriveSdaLow();
     }
 }
 
@@ -108,9 +135,13 @@ static uint8_t JY61P_ReadSda(void)
     return ((DL_GPIO_readPins(JY61P_IIC_PORT, JY61P_IIC_SDA_PIN) & JY61P_IIC_SDA_PIN) != 0U) ? 1U : 0U;
 }
 
+static uint8_t JY61P_ReadScl(void)
+{
+    return ((DL_GPIO_readPins(JY61P_IIC_PORT, JY61P_IIC_SCL_PIN) & JY61P_IIC_SCL_PIN) != 0U) ? 1U : 0U;
+}
+
 static void JY61P_Start(void)
 {
-    JY61P_SdaOut();
     JY61P_WriteScl(0U);
     JY61P_WriteSda(1U);
     JY61P_WriteScl(1U);
@@ -123,7 +154,6 @@ static void JY61P_Start(void)
 
 static void JY61P_Stop(void)
 {
-    JY61P_SdaOut();
     JY61P_WriteScl(0U);
     JY61P_WriteSda(0U);
     JY61P_WriteScl(1U);
@@ -134,7 +164,6 @@ static void JY61P_Stop(void)
 
 static void JY61P_SendAck(uint8_t nack)
 {
-    JY61P_SdaOut();
     JY61P_WriteScl(0U);
     JY61P_WriteSda((nack == 0U) ? 0U : 1U);
     delay_us(5);
@@ -147,33 +176,60 @@ static void JY61P_SendAck(uint8_t nack)
 static uint8_t JY61P_WaitAck(void)
 {
     uint8_t wait_count = JY61P_I2C_WAIT_ACK_LIMIT;
+    uint8_t ack;
 
-    JY61P_SdaIn();
     JY61P_WriteSda(1U);
+    delay_us(2);
+    JY61P_WriteScl(1U);
 
-    while ((JY61P_ReadSda() != 0U) && (wait_count != 0U)) {
+    while ((JY61P_ReadScl() == 0U) && (wait_count != 0U)) {
         wait_count--;
-        delay_us(5);
+        delay_us(2);
     }
 
     if (wait_count == 0U) {
         JY61P_Stop();
-        JY61P_SdaOut();
         return 0U;
     }
 
-    JY61P_WriteScl(1U);
     delay_us(5);
+    ack = (JY61P_ReadSda() == 0U) ? 1U : 0U;
     JY61P_WriteScl(0U);
-    JY61P_SdaOut();
-    return 1U;
+
+    if (ack == 0U) {
+        JY61P_Stop();
+    }
+
+    return ack;
+}
+
+static uint8_t JY61P_EnsureBusIdle(void)
+{
+    uint8_t pulse;
+
+    JY61P_WriteSda(1U);
+    JY61P_WriteScl(1U);
+    delay_us(10);
+    if ((JY61P_ReadScl() != 0U) && (JY61P_ReadSda() != 0U)) {
+        return 1U;
+    }
+
+    JY61P_WriteSda(1U);
+    for (pulse = 0U; pulse < 9U; pulse++) {
+        JY61P_WriteScl(0U);
+        delay_us(5);
+        JY61P_WriteScl(1U);
+        delay_us(5);
+    }
+    JY61P_Stop();
+
+    return ((JY61P_ReadScl() != 0U) && (JY61P_ReadSda() != 0U)) ? 1U : 0U;
 }
 
 static void JY61P_SendByte(uint8_t data)
 {
     uint8_t index;
 
-    JY61P_SdaOut();
     JY61P_WriteScl(0U);
 
     for (index = 0U; index < 8U; index++) {
@@ -192,7 +248,7 @@ static uint8_t JY61P_ReadByte(void)
     uint8_t index;
     uint8_t data = 0U;
 
-    JY61P_SdaIn();
+    JY61P_WriteSda(1U);
 
     for (index = 0U; index < 8U; index++) {
         JY61P_WriteScl(0U);
@@ -206,7 +262,6 @@ static uint8_t JY61P_ReadByte(void)
         delay_us(5);
     }
 
-    JY61P_SdaOut();
     return data;
 }
 
@@ -241,17 +296,25 @@ static uint8_t JY61P_ReadData(uint8_t reg, uint8_t *data, uint32_t length)
     uint32_t index;
 
     if ((data == 0) || (length == 0U)) {
+        g_jy61p_sample.i2c_status = JY61P_STATUS_BAD_ARGUMENT;
+        return 0U;
+    }
+
+    if (JY61P_EnsureBusIdle() == 0U) {
+        g_jy61p_sample.i2c_status = JY61P_STATUS_BUS_STUCK;
         return 0U;
     }
 
     JY61P_Start();
     JY61P_SendByte((uint8_t)(JY61P_I2C_ADDR << 1U));
     if (JY61P_WaitAck() == 0U) {
+        g_jy61p_sample.i2c_status = JY61P_STATUS_ADDR_W_NACK;
         return 0U;
     }
 
     JY61P_SendByte(reg);
     if (JY61P_WaitAck() == 0U) {
+        g_jy61p_sample.i2c_status = JY61P_STATUS_REG_NACK;
         return 0U;
     }
 
@@ -259,6 +322,7 @@ static uint8_t JY61P_ReadData(uint8_t reg, uint8_t *data, uint32_t length)
     JY61P_Start();
     JY61P_SendByte((uint8_t)((JY61P_I2C_ADDR << 1U) | 1U));
     if (JY61P_WaitAck() == 0U) {
+        g_jy61p_sample.i2c_status = JY61P_STATUS_ADDR_R_NACK;
         return 0U;
     }
 
@@ -268,6 +332,7 @@ static uint8_t JY61P_ReadData(uint8_t reg, uint8_t *data, uint32_t length)
     }
 
     JY61P_Stop();
+    g_jy61p_sample.i2c_status = JY61P_STATUS_OK;
     return 1U;
 }
 
@@ -318,6 +383,8 @@ static uint8_t JY61P_ReadAngles(void)
 {
     uint8_t data[JY61P_READ_ANGLE_LEN] = {0U};
     uint8_t ok;
+    uint8_t all_zero = 1U;
+    uint8_t all_high = 1U;
     int32_t yaw_now_cdeg;
     int32_t yaw_delta_cdeg;
     int32_t gyro_est_mdps = 0;
@@ -326,6 +393,26 @@ static uint8_t JY61P_ReadAngles(void)
 
     ok = JY61P_ReadData(JY61P_REG_ROLL_L, data, JY61P_READ_ANGLE_LEN);
     if (ok == 0U) {
+        g_jy61p_sample.i2c_error_count++;
+        return 0U;
+    }
+
+    for (uint8_t index = 0U; index < JY61P_READ_ANGLE_LEN; index++) {
+        if (data[index] != 0U) {
+            all_zero = 0U;
+        }
+        if (data[index] != 0xFFU) {
+            all_high = 0U;
+        }
+    }
+
+    if (all_zero != 0U) {
+        g_jy61p_sample.i2c_status = JY61P_STATUS_ALL_ZERO;
+        g_jy61p_sample.i2c_error_count++;
+        return 0U;
+    }
+    if (all_high != 0U) {
+        g_jy61p_sample.i2c_status = JY61P_STATUS_ALL_HIGH;
         g_jy61p_sample.i2c_error_count++;
         return 0U;
     }
@@ -371,6 +458,7 @@ static uint8_t JY61P_ReadAngles(void)
     return 1U;
 }
 
+#if JY61P_HARDWARE_ZERO_ON_BOOT
 static void JY61P_ZeroHardware(void)
 {
     const uint8_t unlock_reg[2] = {0x88U, 0xB5U};
@@ -392,6 +480,7 @@ static void JY61P_ZeroHardware(void)
     (void)JY61P_WriteData(JY61P_REG_SAVE, save_reg, 2U);
     delay_ms(200);
 }
+#endif
 
 static void JY62_Init(void)
 {
@@ -407,6 +496,7 @@ static void JY62_Init(void)
     g_jy61p_sample.last_frame_type = 0U;
     g_jy61p_sample.raw_count = 0U;
     g_jy61p_sample.raw_write_index = 0U;
+    g_jy61p_sample.i2c_status = JY61P_STATUS_OK;
     g_jy61p_sample.header_count = 0U;
     g_jy61p_sample.frame_count = 0U;
     g_jy61p_sample.unknown_frame_count = 0U;
@@ -422,10 +512,12 @@ static void JY62_Init(void)
     g_jy61p_gyro_z_filtered_mdps = 0;
     g_jy61p_gyro_z_filter_valid = 0U;
 
-    JY61P_SdaOut();
     JY61P_WriteScl(1U);
     JY61P_WriteSda(1U);
+    delay_ms(JY61P_BOOT_DELAY_MS);
+#if JY61P_HARDWARE_ZERO_ON_BOOT
     JY61P_ZeroHardware();
+#endif
     (void)JY61P_ReadAngles();
 }
 
@@ -462,6 +554,7 @@ static uint32_t JY62_GetNavigation(jy62_navigation_t *nav)
         nav->rx_byte_count = g_jy61p_sample.rx_byte_count;
         nav->header_count = g_jy61p_sample.header_count;
         nav->frame_count = g_jy61p_sample.frame_count;
+        nav->i2c_status = g_jy61p_sample.i2c_status;
         nav->checksum_error = g_jy61p_sample.i2c_error_count;
         nav->uart_error_count = 0U;
         nav->overrun_count = 0U;

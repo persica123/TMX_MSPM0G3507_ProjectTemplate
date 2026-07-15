@@ -3,6 +3,7 @@
 #include "bsp_tb6612.h"
 #include "bsp_ir_tracking.h"
 #include "bsp_jy62.h"
+#include "bsp_oled.h"
 #include "app_config.h"
 #include "app_control.h"
 #include "app_motion_utils.h"
@@ -36,9 +37,20 @@ typedef struct {
     uint8_t stop_mask;
     uint8_t forbid_mask;
     int32_t stop_error_max;
+    int32_t line_stop_min_yaw_cdeg;
     uint8_t yaw_stop_enable;
     int32_t yaw_stop_target_cdeg;
     uint32_t control_period_ms;
+    /*
+     * 刚看到单侧边缘线时的短时转向增强。用于第三问 D 点，
+     * 到时或边缘线消失后自动恢复常规快速转向 PWM。
+     */
+    uint8_t edge_boost_mask;
+    uint32_t edge_boost_ms;
+    int16_t edge_boost_motor_b_pwm;
+    int16_t edge_boost_motor_a_pwm;
+    /* 正常识别到入弯线后是否直接交接给后续循迹，不执行结束刹车。 */
+    uint8_t skip_finish_brake;
 } sensor_fast_turn_config_t;
 
 /**
@@ -78,11 +90,21 @@ static void jy62_print_navigation_line(const char *mode, uint32_t elapsed_ms)
         frame_delta = JY62_GetNavigation(&nav);
     }
 
-    lc_printf("JY61P mode=%s t=%lu df=%lu ok=%u flags=0x%02X yaw_cdeg=%ld rel_cdeg=%ld gz_mdps=%ld gyro_z_filtered_mdps=%ld rx=%lu frames=%lu i2c_err=%lu\r\n",
+    OLED_ShowNavigation(nav.yaw_cdeg,
+        nav.yaw_relative_cdeg,
+        nav.roll_cdeg,
+        nav.pitch_cdeg,
+        nav.valid,
+        nav.i2c_status,
+        nav.frame_count,
+        nav.checksum_error);
+
+    lc_printf("JY61P mode=%s t=%lu df=%lu ok=%u status=%u flags=0x%02X yaw_cdeg=%ld rel_cdeg=%ld gz_mdps=%ld gyro_z_filtered_mdps=%ld rx=%lu frames=%lu i2c_err=%lu\r\n",
         mode,
         elapsed_ms,
         frame_delta,
         nav.valid,
+        nav.i2c_status,
         nav.update_flags,
         nav.yaw_cdeg,
         nav.yaw_relative_cdeg,
@@ -130,6 +152,23 @@ static uint8_t jy62_zero_to_current(const char *mode, uint32_t elapsed_ms)
 #endif
 }
 
+static void jy62_update_oled_once(void)
+{
+#if ENABLE_JY62_NAV
+    jy62_navigation_t nav = {0};
+
+    (void)JY62_GetNavigation(&nav);
+    OLED_ShowNavigation(nav.yaw_cdeg,
+        nav.yaw_relative_cdeg,
+        nav.roll_cdeg,
+        nav.pitch_cdeg,
+        nav.valid,
+        nav.i2c_status,
+        nav.frame_count,
+        nav.checksum_error);
+#endif
+}
+
 static void race_diff_pid_reset(straight_pid_t *pid);
 static void race_drive_config(straight_drive_config_t *config,
     int32_t base_pwm,
@@ -164,9 +203,15 @@ int main(void)
     lc_printf("\r\nBOOT: UART OK, IR line follow firmware\r\n");
 
 #if ENABLE_JY62_NAV
+    if (OLED_Init() != 0U) {
+        lc_printf("BOOT: OLED ready, I2C SDA=PA30 SCL=PA29 addr=0x3C\r\n");
+    } else {
+        lc_printf("BOOT: OLED init failed, check PA30/PA29 wiring/address\r\n");
+    }
+
     JY62_Init();
     g_jy62_zero_ready = 0U;
-    lc_printf("BOOT: JY61P I2C ready, PA10 -> SCL, PA11 -> SDA, addr=0x50\r\n");
+    lc_printf("BOOT: JY61P soft I2C ready, PA10 -> SCL, PA11 -> SDA, addr=0x50\r\n");
     delay_ms(JY62_BOOT_ZERO_DELAY_MS);
     (void)jy62_zero_to_current("boot_zero", JY62_BOOT_ZERO_DELAY_MS);
 #endif
@@ -188,7 +233,8 @@ int main(void)
 
     while (1) {
         TB6612_Brake();
-        delay_ms_with_st011(TASK_BUTTON_IDLE_MS);
+        jy62_update_oled_once();
+        delay_ms_with_st011(OLED_REFRESH_MIN_MS);
     }
 }
 

@@ -17,6 +17,8 @@ static volatile int32_t g_motor_a_encoder_count;
 static volatile int32_t g_motor_b_encoder_count;
 static volatile uint8_t g_motor_a_encoder_state;
 static volatile uint8_t g_motor_b_encoder_state;
+static int32_t g_encoder_calibration_offset_count;
+static uint8_t g_encoder_calibration_enabled;
 
 /* 读取编码器 A/B 两相，压缩成 2 bit 状态：A 相为 bit1，B 相为 bit0。 */
 /**
@@ -113,6 +115,18 @@ static void encoder_reset_all_state(void)
         ENCODER_MOTOR_A_B_PIN);
 }
 
+static int32_t encoder_abs_i32(int32_t value)
+{
+    return (value < 0) ? -value : value;
+}
+
+static int32_t encoder_distance_from_counts(int32_t motor_b_count,
+    int32_t motor_a_count)
+{
+    return (encoder_abs_i32(motor_b_count) +
+        encoder_abs_i32(motor_a_count)) / 2;
+}
+
 /**
  * @brief 清除所有编码器引脚的待处理 GPIO 中断标志。
  */
@@ -129,6 +143,8 @@ static void encoder_clear_all_interrupts(void)
  */
 static void encoder_init_runtime(void)
 {
+    g_encoder_calibration_offset_count = 0;
+    g_encoder_calibration_enabled = 0U;
     encoder_reset_all_state();
     encoder_clear_all_interrupts();
 }
@@ -177,6 +193,24 @@ static void encoder_get_delta_counts(int32_t *motor_b_delta, int32_t *motor_a_de
 }
 
 /**
+ * @brief 从当前车位重新开始累计 OLED/调参用的总里程。
+ */
+static void encoder_reset_calibration_distance_count(void)
+{
+    int32_t dummy_b;
+    int32_t dummy_a;
+
+    __disable_irq();
+    g_encoder_calibration_offset_count = 0;
+    g_encoder_calibration_enabled = 1U;
+    encoder_reset_all_state();
+    __enable_irq();
+
+    encoder_clear_all_interrupts();
+    encoder_get_delta_counts(&dummy_b, &dummy_a);
+}
+
+/**
  * @brief 返回当前编码器累计计数。
  */
 static void encoder_get_total_counts(int32_t *motor_b_total, int32_t *motor_a_total)
@@ -191,12 +225,29 @@ static void encoder_reset_distance_counts(void)
 {
     int32_t dummy_b;
     int32_t dummy_a;
+    int32_t segment_distance_count;
 
     __disable_irq();
+    segment_distance_count = encoder_distance_from_counts(
+        g_motor_b_encoder_count,
+        g_motor_a_encoder_count);
+    if (g_encoder_calibration_enabled != 0U) {
+        g_encoder_calibration_offset_count += segment_distance_count;
+    }
     encoder_reset_all_state();
     __enable_irq();
 
     encoder_get_delta_counts(&dummy_b, &dummy_a);
+}
+
+static int32_t encoder_get_calibration_distance_count(void)
+{
+    int32_t motor_b_count;
+    int32_t motor_a_count;
+
+    encoder_snapshot_counts(&motor_b_count, &motor_a_count);
+    return g_encoder_calibration_offset_count +
+        encoder_distance_from_counts(motor_b_count, motor_a_count);
 }
 
 /* 在固定时间窗口内测量编码器变化量，用于可选的编码器自检。 */

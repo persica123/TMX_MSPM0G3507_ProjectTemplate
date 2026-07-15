@@ -278,7 +278,41 @@ typedef struct {
     uint8_t yaw_stop_ready;
     uint8_t yaw_error_valid;
     uint8_t yaw_cross_ready;
+    uint8_t edge_boost_active;
 } race_sensor_fast_turn_state_t;
+
+/**
+ * @brief 判断是否应对单侧边缘线施加短时增强转向。
+ */
+static uint8_t race_sensor_fast_turn_edge_boost_active(
+    const sensor_fast_turn_config_t *config,
+    const race_sensor_fast_turn_state_t *state)
+{
+    return ((config->edge_boost_mask != 0U) &&
+        (config->edge_boost_ms != 0U) &&
+        (state->elapsed_ms < config->edge_boost_ms) &&
+        (state->ir_ok != 0U) &&
+        (race_ir_mask_seen(&state->sample, config->edge_boost_mask, 0U) != 0U)) ?
+        1U : 0U;
+}
+
+/**
+ * @brief 按“边缘增强 > 慢速 > 常规”的优先级输出快速转向 PWM。
+ */
+static void race_sensor_fast_turn_apply_pwm(
+    const sensor_fast_turn_config_t *config,
+    const race_sensor_fast_turn_state_t *state)
+{
+    if (state->edge_boost_active != 0U) {
+        TB6612_SetDifferential(config->edge_boost_motor_b_pwm,
+            config->edge_boost_motor_a_pwm);
+    } else if (state->slow_mode != 0U) {
+        TB6612_SetDifferential(config->slow_motor_b_pwm,
+            config->slow_motor_a_pwm);
+    } else {
+        TB6612_SetDifferential(config->motor_b_pwm, config->motor_a_pwm);
+    }
+}
 
 /**
  * @brief 将快速转向停止原因转换为日志文本。
@@ -319,16 +353,20 @@ static void race_sensor_fast_turn_start(
             state->slow_mode = 1U;
         }
     }
-    TB6612_SetDifferential((state->slow_mode != 0U) ?
-            config->slow_motor_b_pwm : config->motor_b_pwm,
-        (state->slow_mode != 0U) ?
-            config->slow_motor_a_pwm : config->motor_a_pwm);
-    race_log_printf("%s start: sensor_fast_turn pwm=%d/%d slow=%d/%d stop_mask=0x%02X forbid=0x%02X err_max=%ld yaw_stop=%u target=%ld\r\n",
+    /* 在第一个控制周期前就读取一次边缘灰度，避免 D 点强转晚一拍。 */
+    state->ir_ok = IRTracking_ReadSample(&state->sample);
+    state->edge_boost_active = race_sensor_fast_turn_edge_boost_active(config,
+        state);
+    race_sensor_fast_turn_apply_pwm(config, state);
+    race_log_printf("%s start: sensor_fast_turn pwm=%d/%d slow=%d/%d edge_mask=0x%02X edge_ms=%lu boost=%u stop_mask=0x%02X forbid=0x%02X err_max=%ld yaw_stop=%u target=%ld\r\n",
         config->tag,
         config->motor_b_pwm,
         config->motor_a_pwm,
         config->slow_motor_b_pwm,
         config->slow_motor_a_pwm,
+        config->edge_boost_mask,
+        config->edge_boost_ms,
+        state->edge_boost_active,
         config->stop_mask,
         config->forbid_mask,
         config->stop_error_max,
@@ -366,6 +404,8 @@ static void race_sensor_fast_turn_update(
     encoder_get_total_counts(&state->motor_b_total, &state->motor_a_total);
     state->line_seen = race_sensor_fast_turn_line_seen(state->ir_ok,
         &state->sample);
+    state->edge_boost_active = race_sensor_fast_turn_edge_boost_active(config,
+        state);
     state->yaw_stop_ready = race_sensor_fast_turn_yaw_ready(config,
         state->nav_ok,
         state->yaw_stop_error_cdeg,
@@ -376,15 +416,19 @@ static void race_sensor_fast_turn_update(
         state->yaw_stop_error_cdeg,
         state->slow_mode) != 0U) {
         state->slow_mode = 1U;
-        TB6612_SetDifferential(config->slow_motor_b_pwm,
-            config->slow_motor_a_pwm);
     }
+    race_sensor_fast_turn_apply_pwm(config, state);
     state->line_stop_ready = race_sensor_fast_turn_line_ready(config,
         state->line_seen,
         &state->sample,
         &state->center_ready,
         &state->wide_ready,
         &state->err_ready);
+    if ((config->line_stop_min_yaw_cdeg > 0) &&
+        (state->turn_nav_ok != 0U) && (state->nav_ok != 0U) &&
+        (state->turn_yaw_progress < config->line_stop_min_yaw_cdeg)) {
+        state->line_stop_ready = 0U;
+    }
 }
 
 /**
@@ -394,7 +438,7 @@ static void race_sensor_fast_turn_log_sample(
     const sensor_fast_turn_config_t *config,
     const race_sensor_fast_turn_state_t *state)
 {
-    race_log_printf("%s t=%lu nav=%u yaw=%ld yprog=%ld target=%ld yerr=%ld gzlp=%ld ir=%u raw=0x%02X mask=0x%02X cnt=%u lost=%u err=%ld B=%ld A=%ld slow=%u seen=%u center=%u wide=%u err_ok=%u line_ready=%u yaw_ready=%u\r\n",
+    race_log_printf("%s t=%lu nav=%u yaw=%ld yprog=%ld target=%ld yerr=%ld gzlp=%ld ir=%u raw=0x%02X mask=0x%02X cnt=%u lost=%u err=%ld B=%ld A=%ld slow=%u boost=%u seen=%u center=%u wide=%u err_ok=%u line_ready=%u yaw_ready=%u\r\n",
         config->tag,
         state->elapsed_ms,
         state->nav_ok,
@@ -412,6 +456,7 @@ static void race_sensor_fast_turn_log_sample(
         state->motor_b_total,
         state->motor_a_total,
         state->slow_mode,
+        state->edge_boost_active,
         state->line_seen,
         state->center_ready,
         state->wide_ready,
@@ -427,11 +472,19 @@ static void race_sensor_fast_turn_finish(
     const sensor_fast_turn_config_t *config,
     race_sensor_fast_turn_state_t *state)
 {
-    TB6612_Brake();
+    /*
+     * D 点正常找回 DA 线时需要无缝交接给后续灰度循迹；但超时和急停
+     * 仍必须立即刹车，不能因省略交接刹车而失去保护。
+     */
+    if ((config->skip_finish_brake == 0U) ||
+        ((state->stop_reason != 1U) && (state->stop_reason != 4U) &&
+         (state->stop_reason != 6U))) {
+        TB6612_Brake();
+    }
     state->ir_ok = IRTracking_ReadSample(&state->sample);
     state->nav_ok = JY62_PeekNavigation(&state->nav);
     encoder_get_total_counts(&state->motor_b_total, &state->motor_a_total);
-    race_log_printf("%s stop: reason=%s t=%lu nav=%u yaw=%ld target=%ld yerr=%ld gzlp=%ld ir=%u raw=0x%02X mask=0x%02X cnt=%u lost=%u err=%ld B=%ld A=%ld slow=%u yaw_ready=%u\r\n",
+    race_log_printf("%s stop: reason=%s t=%lu nav=%u yaw=%ld target=%ld yerr=%ld gzlp=%ld ir=%u raw=0x%02X mask=0x%02X cnt=%u lost=%u err=%ld B=%ld A=%ld slow=%u boost=%u yaw_ready=%u\r\n",
         config->tag,
         race_sensor_fast_turn_stop_reason_name(state->stop_reason),
         state->elapsed_ms,
@@ -451,6 +504,7 @@ static void race_sensor_fast_turn_finish(
         state->motor_b_total,
         state->motor_a_total,
         state->slow_mode,
+        state->edge_boost_active,
         state->yaw_stop_ready);
 }
 

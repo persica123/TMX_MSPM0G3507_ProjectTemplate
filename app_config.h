@@ -17,6 +17,8 @@
 #define CONTROL_PERIOD_MS (20)
 /* 任务四高速模式使用更短控制周期，提高转向和航向修正响应。 */
 #define RACE_TASK4_CONTROL_PERIOD_MS (10)
+/* 当前联调只启用第三问；第四问入口和其状态分支暂时禁用，源码保留。 */
+#define APP_ENABLE_TASK4 (0U)
 
 /* 当前接线约定：左轮为 B 电机，右轮为 A 电机。 */
 #define STRAIGHT_B_BASE_PWM (628)
@@ -45,6 +47,15 @@
 /* ST011 声光模块低电平触发：空闲高电平，短暂拉低表示提示。 */
 #define ST011_ACTIVE_LOW (1)
 
+/* 0: disable motor output for hand-pushed distance calibration; 1: normal driving. */
+#define APP_MOTOR_OUTPUT_ENABLE (1)
+#if APP_MOTOR_OUTPUT_ENABLE == 0
+#define APP_HAND_PUSH_CALIBRATION_MODE (1)
+#else
+#define APP_HAND_PUSH_CALIBRATION_MODE (0)
+#endif
+#define APP_HAND_PUSH_DISABLE_TIMEOUT (1)
+
 /* 编码器自检参数；只有车轮架空时才建议启用自检流程。 */
 #define ENCODER_TEST_PWM  (260)
 #define ENCODER_TEST_MS   (500)
@@ -61,6 +72,7 @@
     (((ENCODER_COUNTS_PER_WHEEL_REV * 100000L) + ((31416L * DRIVE_WHEEL_DIAMETER_MM) / 2L)) / \
     (31416L * DRIVE_WHEEL_DIAMETER_MM))
 #define DISTANCE_CM_TO_COUNT(cm)      ((cm) * COUNTS_PER_CM)
+#define DISTANCE_0P1CM_TO_COUNT(cm10) (((cm10) * COUNTS_PER_CM + 5L) / 10L)
 
 #define TRACK_AB_STRAIGHT_DISTANCE_CM (100L)
 #define TRACK_ARC_RADIUS_CM           (40L)
@@ -146,11 +158,73 @@
 /* 点位声光提示。 */
 #define TASK2_POINT_ALARM_MS (120)
 
+#define TASK2_STRAIGHT_PWM_PERCENT       (85)
+#define TASK2_ARC_PWM_PERCENT            (72)
+/* 弧线巡线 PID：数字灰度误差先滤波和限跳变，再计算 PD。 */
+#define TASK2_ARC_TURN_BOOST_PERCENT     (90)
+#define TASK2_ARC_LINE_KP_NUM            (10)
+#define TASK2_ARC_LINE_KP_DEN            (100)
+#define TASK2_ARC_LINE_KD_NUM            (3)
+#define TASK2_ARC_LINE_KD_DEN            (100)
+#define TASK2_ARC_LINE_TURN_LIMIT        (180)
+/* 最终施加到两轮的差速转向上限，防止内侧轮被压到近零而甩转。 */
+#define TASK2_ARC_CONTROL_TURN_LIMIT     (130)
+#define TASK2_ARC_LINE_LOST_TURN         (140)
+#define TASK2_ARC_LINE_ERROR_DEADBAND    (250)
+#define TASK2_ARC_LINE_FILTER_DIVISOR    (3)
+/* 6 路及以上通常是交叉线/宽线，位置均值不再代表正常轨迹。 */
+#define TASK2_ARC_ERROR_MAX_ACTIVE_COUNT (5)
+/* 抑制 8 路数字传感器单周期从一侧跳到另一侧造成的假微分。 */
+#define TASK2_ARC_ERROR_JUMP_LIMIT       (2000)
+
+/*
+ * CD 直线结束后直接进入 DA，需先消除直线段遗留的较高 PWM。该段目标
+ * 约为 BC 入口丢线降速后的弧线速度，短距离后再恢复统一的 BC/DA 巡迹速度。
+ */
+#define TASK2_DA_ENTRY_DISTANCE_CM        (30L)
+#define TASK2_DA_ENTRY_COUNT \
+    DISTANCE_CM_TO_COUNT(TASK2_DA_ENTRY_DISTANCE_CM)
+#define TASK2_DA_ENTRY_PWM_PERCENT        (90)
+#define TASK2_DA_ENTRY_B_PWM              (350)
+#define TASK2_DA_ENTRY_A_PWM              (350)
+
+/* BC 出弧交接：在目标航向前先降速，再用低速消除残余角速度后进入 CD。 */
+#define TASK2_BC_EXIT_DECEL_START_DISTANCE_CM (95L)
+#define TASK2_BC_EXIT_DECEL_START_COUNT \
+    DISTANCE_CM_TO_COUNT(TASK2_BC_EXIT_DECEL_START_DISTANCE_CM)
+#define TASK2_BC_EXIT_PWM_PERCENT        (85)
+#define TASK2_BC_EXIT_STABILIZE_PWM       (380)
+#define TASK2_BC_EXIT_STABILIZE_MAX_MS    (240)
+#define TASK2_BC_EXIT_STABILIZE_YAW_TOL_CDEG (100)
+#define TASK2_BC_EXIT_STABILIZE_GYRO_TOL_MDPS (14000)
+#define TASK2_BC_EXIT_STABILIZE_CONFIRM_COUNT (3)
+
+/* CD 刚出弯时先以较低 PWM 建立直线航向，再平滑升到正常直线速度。 */
+#define TASK2_CD_ENTRY_B_PWM              (380)
+#define TASK2_CD_ENTRY_A_PWM              (380)
+#define TASK2_CD_ENTRY_RAMP_MS            (500)
+
+/* Task 2 AB uses a faster JY61P heading correction before entering the arc. */
+#define TASK2_AB_HEADING_DEADBAND_CDEG (25)
+#define TASK2_AB_HEADING_CORR_DIVISOR  (5)
+#define TASK2_AB_HEADING_CORR_MAX      (160)
+
 /* CD 直线出弧后的固定航向目标和航向修正强度。 */
-#define TASK2_CD_STRAIGHT_TARGET_CDEG       (18000)
+#define TASK2_CD_STRAIGHT_TARGET_CDEG       (TASK2_BC_EXIT_YAW_TARGET_CDEG)
 #define TASK2_CD_HEADING_CORR_DIVISOR       (5)
 #define TASK2_CD_HEADING_CORR_MAX           (160)
 #define TASK2_CD_HEADING_GYRO_DAMP_DIVISOR  (700)
+
+/*
+ * C->D 仍以固定航向为主；当窄黑线只落在一侧灰度头时，叠加受限的
+ * 比例纠偏。X8(最右)命中时输出为负，按 B=左轮/A=右轮的接线约定使
+ * 小车向右靠线。宽横线(超过 2 路命中)不参与转向，避免临近 D 点误打方向。
+ */
+#define TASK2_CD_GRAY_GUIDE_ENABLE           (1U)
+#define TASK2_CD_GRAY_GUIDE_MAX_ACTIVE_COUNT (2U)
+#define TASK2_CD_GRAY_GUIDE_DEADBAND         (1000)
+#define TASK2_CD_GRAY_GUIDE_DIVISOR          (42)
+#define TASK2_CD_GRAY_GUIDE_CORR_MAX         (85)
 
 /* CD 直线到线使能距离：避开 C 点出弯后的残留线形，再开始寻找 D 点。 */
 #define TASK2_STRAIGHT_SEARCH_START_DISTANCE_CM (85L)
@@ -158,6 +232,25 @@
     DISTANCE_CM_TO_COUNT(TASK2_STRAIGHT_SEARCH_START_DISTANCE_CM)
 
 /* BC/DA 弧线直接复用任务三/四竞速弧线控制，具体速度、出弧和保护参数见 TASK3_* / RACE_*。 */
+#define TASK2_ARC_EXIT_ARM_DISTANCE_CM   (90L)
+#define TASK2_ARC_FORCE_STOP_DISTANCE_CM (160L)
+#define TASK2_BC_EXIT_HARD_DISTANCE_CM   (185L)
+#define TASK2_ARC_EXIT_ARM_COUNT \
+    DISTANCE_CM_TO_COUNT(TASK2_ARC_EXIT_ARM_DISTANCE_CM)
+#define TASK2_ARC_FORCE_STOP_COUNT \
+    DISTANCE_CM_TO_COUNT(TASK2_ARC_FORCE_STOP_DISTANCE_CM)
+#define TASK2_BC_EXIT_HARD_COUNT \
+    DISTANCE_CM_TO_COUNT(TASK2_BC_EXIT_HARD_DISTANCE_CM)
+#define TASK2_BC_EXIT_YAW_GATE_ENABLE       (1)
+#define TASK2_BC_EXIT_YAW_TARGET_CDEG       (-17580)
+#define TASK2_BC_EXIT_YAW_TOLERANCE_CDEG    (50)
+#define TASK2_BC_EXIT_FORCE_YAW_TOLERANCE_CDEG (300)
+#define TASK2_FINAL_FINISH_DISTANCE_0P1CM   (4350L)
+#define TASK2_FINAL_FINISH_COUNT \
+    DISTANCE_0P1CM_TO_COUNT(TASK2_FINAL_FINISH_DISTANCE_0P1CM)
+#define TASK2_FINAL_DA_MIN_DISTANCE_CM      (90L)
+#define TASK2_FINAL_DA_MIN_COUNT \
+    DISTANCE_CM_TO_COUNT(TASK2_FINAL_DA_MIN_DISTANCE_CM)
 
 /* ==========================================================================
  * 四、任务三：A -> C -> B -> D -> A，单圈竞速
@@ -178,6 +271,18 @@
     (TASK3_ARC_FINISH_COUNT + DISTANCE_CM_TO_COUNT(TASK3_ARC_FORCE_STOP_EXTRA_DISTANCE_CM))
 #define TASK3_ARC_TURN_LEFT         (-1)
 #define TASK3_ARC_TURN_RIGHT        (1)
+/* 弧线跑完整个几何长度且实际转角充分后，才允许切入下一段。 */
+#define TASK3_ARC_EXIT_MIN_YAW_CDEG          (14000)
+/* CB 的 B 点以几何弧长为准，到点立即切换，不保留越线保护距离。 */
+#define TASK3_CB_B_POINT_COUNT               (TASK3_ARC_LENGTH_COUNT)
+/* 第三问 B 点出弧：独立累计 Dis 达此值且灰度丢线时立即切入 BD。 */
+#define TASK3_B_EXIT_DISTANCE_CM             (220L)
+#define TASK3_B_EXIT_DISTANCE_COUNT \
+    DISTANCE_CM_TO_COUNT(TASK3_B_EXIT_DISTANCE_CM)
+/* 第三问 DA 回到 A 点结束：独立累计 Dis 达此值且灰度丢线。 */
+#define TASK3_A_FINISH_DISTANCE_CM          (560L)
+#define TASK3_A_FINISH_DISTANCE_COUNT \
+    DISTANCE_CM_TO_COUNT(TASK3_A_FINISH_DISTANCE_CM)
 
 /* 任务三历史直线航向和直线末端找线参数，保留兼容旧调参记录。 */
 #define TASK3_AC_HEADING_TARGET_CDEG       (-3660)
@@ -187,6 +292,8 @@
 #define TASK3_STRAIGHT_CORR_MAX            (155)
 #define TASK3_BD_HEADING_CORR_DIVISOR      (5)
 #define TASK3_BD_HEADING_CORR_MAX          (170)
+/* BD 是进入 D 点前的高速直线，单独降速以缩短 D 点制动距离。 */
+#define TASK3_BD_STRAIGHT_BASE_PWM          (500)
 #define TASK3_STRAIGHT_LINE_ARM_DISTANCE_CM     (92L)
 #define TASK3_STRAIGHT_FORCE_STOP_DISTANCE_CM   (174L)
 #define TASK3_STRAIGHT_SEARCH_START_DISTANCE_CM (92L)
@@ -218,6 +325,60 @@
 #define TASK3_ARC_WIDE_LINE_MIN_COUNT (6)
 #define TASK3_ARC_MAX_RUN_MS          (12000)
 #define TASK3_ARC_REPORT_PERIOD_MS    (100)
+/* 第三问 CB 整段采用较低基础速度，优先保证 B 点交接可控而非追求弧线速度。 */
+#define TASK3_CB_ARC_BASE_PWM          (440)
+/* CB 接近 B 点时先减小平移速度，给 B->D 定角转向留出稳定的初始姿态。 */
+#define TASK3_CB_EXIT_DECEL_DISTANCE_CM (65L)
+#define TASK3_CB_EXIT_DECEL_START_COUNT \
+    (TASK3_CB_B_POINT_COUNT - \
+        DISTANCE_CM_TO_COUNT(TASK3_CB_EXIT_DECEL_DISTANCE_CM))
+#define TASK3_CB_EXIT_MIN_BASE_PWM     (140)
+/* B 点一经识别直接进入满 PWM 主动刹车，随后立即执行 B→D 定角转向。 */
+/* 第三问弧线以灰度闭环为主，轮速差只保留很小的入弯引导，不能压过灰度修正。 */
+#define TASK3_CB_ARC_ENTRY_TARGET_DIFF  (-16)
+#define TASK3_CB_ARC_CRUISE_TARGET_DIFF (-12)
+#define TASK3_DA_ARC_ENTRY_TARGET_DIFF  (16)
+#define TASK3_DA_ARC_CRUISE_TARGET_DIFF (12)
+/* CB 最后减速段借鉴任务二的数字灰度 PD：滤波稍慢、输出限幅且平滑爬升。 */
+#define TASK3_CB_EXIT_LINE_FILTER_DIVISOR (3)
+#define TASK3_CB_EXIT_LINE_TURN_DIVISOR   (10)
+#define TASK3_CB_EXIT_LINE_KD_DIVISOR     (30)
+#define TASK3_CB_EXIT_LINE_TURN_LIMIT     (180)
+#define TASK3_CB_EXIT_LINE_SLEW_STEP      (28)
+#define TASK3_CB_EXIT_CONTROL_TURN_LIMIT  (150)
+/* 数字灰度弧线专用 PD：缩短滤波链路和输出爬升时间，兼顾单侧传感器跳变。 */
+#define TASK3_ARC_LINE_ERROR_DEADBAND       (200)
+#define TASK3_ARC_LINE_ERROR_FILTER_DIVISOR (2)
+#define TASK3_ARC_LINE_ERROR_JUMP_LIMIT     (2000)
+#define TASK3_ARC_LINE_TURN_DIVISOR         (7)
+#define TASK3_ARC_LINE_KD_DIVISOR           (18)
+#define TASK3_ARC_LINE_TURN_LIMIT           (220)
+#define TASK3_ARC_LINE_TURN_SLEW_STEP       (70)
+/* 灰度有效时，陀螺仪几何弧线只作为轻微阻尼，避免覆盖真实线位。 */
+#define TASK3_ARC_NAV_WITH_LINE_PERCENT     (35)
+/* 弧线刚入线时丢线只保持短暂历史输出，随后回零，禁止盲目继续向弯内打方向。 */
+#define TASK3_ARC_LOST_TURN            (0)
+#define TASK3_ARC_LOST_TURN_DECAY_STEP (35)
+
+/* C 点的横向终点线会在左转初期仍被中间灰度头读到，未转足该角度前禁止以灰度提前停转。 */
+#define TASK3_C_TURN_LINE_STOP_MIN_YAW_CDEG (1200)
+/* D 点转入 DA 前同样防止横线导致过早停转；停转后再主动刹车消除角速度。 */
+#define TASK3_D_TURN_LINE_STOP_MIN_YAW_CDEG (1200)
+/* 仅在 D 点刚入弯且右侧边缘灰度头压线时，短时增强右转。 */
+#define TASK3_D_EDGE_BOOST_MS               (80U)
+#define TASK3_D_EDGE_BOOST_B_PWM            (680)
+#define TASK3_D_EDGE_BOOST_A_PWM            (-40)
+#define TASK3_D_TURN_CONTROL_PERIOD_MS       (10U)
+/* 第三问 DA 全段专用强响应灰度 PD；丢线时维持右转趋势，防止直走。 */
+#define TASK3_DA_PWM_PERCENT                (60)
+#define TASK3_DA_LINE_KP_NUM                (12)
+#define TASK3_DA_LINE_KP_DEN                (100)
+#define TASK3_DA_LINE_KD_NUM                (8)
+#define TASK3_DA_LINE_KD_DEN                (100)
+#define TASK3_DA_LINE_TURN_LIMIT            (240)
+#define TASK3_DA_CONTROL_TURN_LIMIT         (200)
+#define TASK3_DA_TURN_SLEW_STEP             (50)
+#define TASK3_DA_LOST_TURN                  (170)
 
 /* 任务三当前竞速主流程使用的起跑对齐和直线航向。 */
 #define RACE_TASK3_START_ALIGN_ENABLE (1)
@@ -226,7 +387,7 @@
 #define RACE_TASK3_START_RIGHT_TURN_SLOW_B_PWM (RACE_EXIT_RIGHT_TURN_SLOW_B_PWM)
 #define RACE_TASK3_START_RIGHT_TURN_SLOW_A_PWM (RACE_EXIT_RIGHT_TURN_SLOW_A_PWM)
 #define RACE_TASK3_AC_HEADING_TARGET_CDEG (-3400)
-#define RACE_TASK3_BD_HEADING_TARGET_CDEG (-18000 + 3520)
+#define RACE_TASK3_BD_HEADING_TARGET_CDEG (-17600 + 3520)
 #define RACE_TASK3_AC_FORCE_TURN_DISTANCE_CM (118L)
 #define RACE_TASK3_AC_FORCE_TURN_COUNT \
     DISTANCE_CM_TO_COUNT(RACE_TASK3_AC_FORCE_TURN_DISTANCE_CM)
@@ -339,15 +500,20 @@
 #define RACE_TOTAL_MAX_RUN_MS      (240000)
 #define RACE_LINE_REPORT_PERIOD_MS (200)
 
-/* 红外循迹基础控制参数：误差滤波、转向比例/微分、丢线补偿和限幅。 */
+/* 红外循迹基础控制参数：死区、误差/微分滤波、转向比例/微分和限幅。 */
 #define RACE_LINE_BASE_PWM             (560)
 #define RACE_LINE_MIN_PWM              (0)
 #define RACE_LINE_MAX_PWM              (860)
+#define RACE_LINE_ERROR_DEADBAND        (100)
 #define RACE_LINE_TURN_DIVISOR         (9)
-#define RACE_LINE_KD_DIVISOR           (9)
-#define RACE_LINE_DERIV_LIMIT          (700)
-#define RACE_LINE_TURN_LIMIT           (240)
-#define RACE_LINE_ERROR_FILTER_DIVISOR (3)
+#define RACE_LINE_KD_DIVISOR           (12)
+#define RACE_LINE_DERIV_LIMIT          (360)
+#define RACE_LINE_DERIV_FILTER_DIVISOR (3)
+#define RACE_LINE_TURN_LIMIT           (300)
+#define RACE_LINE_ERROR_FILTER_DIVISOR (4)
+#define RACE_LINE_TURN_SLEW_STEP       (28)
+#define RACE_LINE_LOST_HOLD_CYCLES     (2)
+#define RACE_LINE_LOST_TURN_DECAY_STEP (35)
 #define RACE_LINE_LOST_BASE_DROP       (60)
 #define RACE_LINE_LOST_TURN            (150)
 

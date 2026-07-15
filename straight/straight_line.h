@@ -20,6 +20,7 @@
 #include "bsp_encoder.h"
 #include "bsp_ir_tracking.h"
 #include "bsp_jy62.h"
+#include "bsp_oled.h"
 #include "bsp_tb6612.h"
 
 /**
@@ -37,9 +38,19 @@ typedef struct {
     int32_t force_stop_count;
     uint8_t stop_min_ir_count;
     uint8_t yaw_corr_enable;
+    uint8_t task2_ab_yaw_tuning;
+    uint8_t gray_guide_enable;
+    uint8_t gray_guide_max_active_count;
+    int32_t gray_guide_deadband;
+    int32_t gray_guide_divisor;
+    int32_t gray_guide_corr_max;
     uint8_t entry_brake_enable;
     uint8_t fixed_yaw_target_enable;
     int32_t fixed_yaw_target_cdeg;
+    int32_t entry_b_pwm;
+    int32_t entry_a_pwm;
+    uint32_t entry_ramp_ms;
+    uint8_t pwm_percent;
 } straight_line_segment_config_t;
 
 /**
@@ -59,6 +70,7 @@ typedef struct {
     int32_t yaw_start_cdeg;
     int32_t yaw_target_cdeg;
     int32_t yaw_correction;
+    int32_t gray_correction;
     int32_t correction;
     int32_t motor_b_total;
     int32_t motor_a_total;
@@ -134,6 +146,7 @@ typedef struct {
     int32_t motor_a_total;
     int32_t distance_count;
     int32_t yaw_correction;
+    int32_t gray_correction;
     int32_t correction;
     int32_t yaw_start_cdeg;
     int32_t yaw_target_cdeg;
@@ -181,12 +194,49 @@ static int32_t task2_fixed_yaw_correction(uint8_t nav_ok,
 #endif
 }
 
+/*
+ * 数字灰度的单侧窄线只表示横向偏差，不参与航向目标计算。这里采用受限
+ * P 项：右侧为正误差，返回负修正量，从而降低右轮相对 PWM 并让车身右转。
+ * 横向终点线会同时命中多路探头，因此被 active_count 门限剔除。
+ */
+static int32_t straight_line_gray_correction(
+    const straight_line_segment_config_t *config,
+    uint8_t ir_ok,
+    const ir_tracking_sample_t *sample)
+{
+    int32_t line_error;
+    int32_t correction;
+
+    if ((config->gray_guide_enable == 0U) || (ir_ok == 0U) ||
+        (sample == 0) || (sample->line_lost != 0U) ||
+        (sample->active_count == 0U) ||
+        (sample->active_count > config->gray_guide_max_active_count) ||
+        (config->gray_guide_divisor == 0) ||
+        (config->gray_guide_corr_max <= 0)) {
+        return 0;
+    }
+
+    line_error = sample->error;
+    if (abs_i32(line_error) <= config->gray_guide_deadband) {
+        return 0;
+    }
+
+    correction = -(line_error / config->gray_guide_divisor);
+    return clamp_i32(correction,
+        -config->gray_guide_corr_max,
+        config->gray_guide_corr_max);
+}
+
 static int32_t straight_line_yaw_correction(uint8_t nav_ok,
     const jy62_navigation_t *nav,
-    int32_t yaw_start_cdeg)
+    int32_t yaw_start_cdeg,
+    uint8_t task2_ab_yaw_tuning)
 {
 #if ENABLE_JY62_NAV
     int32_t yaw_error_cdeg;
+    int32_t deadband_cdeg;
+    int32_t corr_divisor;
+    int32_t corr_max;
     int32_t correction;
 
     if ((nav_ok == 0U) || (nav == 0)) {
@@ -194,22 +244,32 @@ static int32_t straight_line_yaw_correction(uint8_t nav_ok,
     }
 
     yaw_error_cdeg = normalize_cdeg(nav->yaw_relative_cdeg - yaw_start_cdeg);
-    if (abs_i32(yaw_error_cdeg) <= STRAIGHT_YAW_DEADBAND_CDEG) {
+    deadband_cdeg = (task2_ab_yaw_tuning != 0U) ?
+        TASK2_AB_HEADING_DEADBAND_CDEG : STRAIGHT_YAW_DEADBAND_CDEG;
+    corr_divisor = (task2_ab_yaw_tuning != 0U) ?
+        TASK2_AB_HEADING_CORR_DIVISOR : STRAIGHT_YAW_CORR_DIVISOR;
+    corr_max = (task2_ab_yaw_tuning != 0U) ?
+        TASK2_AB_HEADING_CORR_MAX : STRAIGHT_YAW_CORR_MAX;
+
+    if (abs_i32(yaw_error_cdeg) <= deadband_cdeg) {
         yaw_error_cdeg = 0;
     }
 
-    correction = -(yaw_error_cdeg / STRAIGHT_YAW_CORR_DIVISOR);
+    correction = -(yaw_error_cdeg / corr_divisor);
 #if STRAIGHT_YAW_GYRO_DAMP_DIVISOR > 0
-    correction -= nav->gyro_z_filtered_mdps / STRAIGHT_YAW_GYRO_DAMP_DIVISOR;
+    if (task2_ab_yaw_tuning == 0U) {
+        correction -= nav->gyro_z_filtered_mdps / STRAIGHT_YAW_GYRO_DAMP_DIVISOR;
+    }
 #endif
 
     return clamp_i32(correction,
-        -STRAIGHT_YAW_CORR_MAX,
-        STRAIGHT_YAW_CORR_MAX);
+        -corr_max,
+        corr_max);
 #else
     (void)nav_ok;
     (void)nav;
     (void)yaw_start_cdeg;
+    (void)task2_ab_yaw_tuning;
     return 0;
 #endif
 }
@@ -260,20 +320,36 @@ static void straight_line_prepare_start(
 static void straight_line_apply_drive_control(
     const straight_line_segment_config_t *config,
     const straight_line_control_input_t *input,
+    uint8_t ir_ok,
+    const ir_tracking_sample_t *sample,
     straight_pid_t *pid,
     straight_drive_config_t *drive_config,
     straight_drive_output_t *drive,
     int32_t *yaw_correction,
+    int32_t *gray_correction,
     int32_t *correction)
 {
-    drive_config->base_b_pwm = ramp_i32(TASK1_RAMP_B_START_PWM,
+    int32_t entry_b_pwm = (config->entry_b_pwm != 0) ? config->entry_b_pwm :
+        TASK1_RAMP_B_START_PWM;
+    int32_t entry_a_pwm = (config->entry_a_pwm != 0) ? config->entry_a_pwm :
+        TASK1_RAMP_A_START_PWM;
+    uint32_t entry_ramp_ms = (config->entry_ramp_ms != 0U) ?
+        config->entry_ramp_ms : TASK1_START_RAMP_MS;
+
+    drive_config->base_b_pwm = ramp_i32(entry_b_pwm,
         input->target_b_base_pwm,
         input->elapsed_ms,
-        TASK1_START_RAMP_MS);
-    drive_config->base_a_pwm = ramp_i32(TASK1_RAMP_A_START_PWM,
+        entry_ramp_ms);
+    drive_config->base_a_pwm = ramp_i32(entry_a_pwm,
         input->target_a_base_pwm,
         input->elapsed_ms,
-        TASK1_START_RAMP_MS);
+        entry_ramp_ms);
+    if (config->pwm_percent != 0U) {
+        drive_config->base_b_pwm =
+            (drive_config->base_b_pwm * config->pwm_percent) / 100;
+        drive_config->base_a_pwm =
+            (drive_config->base_a_pwm * config->pwm_percent) / 100;
+    }
     straight_drive_update(pid,
         drive_config,
         input->motor_b_delta,
@@ -288,12 +364,16 @@ static void straight_line_apply_drive_control(
                 input->yaw_target_cdeg) :
             straight_line_yaw_correction(input->nav_ok,
                 input->nav,
-                input->yaw_target_cdeg);
+                input->yaw_target_cdeg,
+                config->task2_ab_yaw_tuning);
     } else {
         *yaw_correction = 0;
     }
 
-    *correction = clamp_i32(drive->correction + *yaw_correction,
+    *gray_correction = straight_line_gray_correction(config, ir_ok, sample);
+
+    *correction = clamp_i32(drive->correction + *yaw_correction +
+            *gray_correction,
         -drive_config->correction_max,
         drive_config->correction_max);
     drive->motor_b_pwm = clamp_i32(drive_config->base_b_pwm - *correction,
@@ -340,6 +420,7 @@ static void straight_line_update_drive_step(
 #else
     runtime->nav_ok = 0U;
 #endif
+    runtime->ir_ok = IRTracking_ReadSample(sample);
     encoder_get_delta_counts(&runtime->motor_b_delta, &runtime->motor_a_delta);
     encoder_get_total_counts(&runtime->motor_b_total, &runtime->motor_a_total);
     {
@@ -358,15 +439,16 @@ static void straight_line_update_drive_step(
 
         straight_line_apply_drive_control(config,
             &control_input,
+            runtime->ir_ok,
+            sample,
             pid,
             drive_config,
             drive,
             &runtime->yaw_correction,
+            &runtime->gray_correction,
             &runtime->correction);
     }
-
     runtime->distance_count = drive->distance_count;
-    runtime->ir_ok = IRTracking_ReadSample(sample);
 }
 
 /**
@@ -406,7 +488,7 @@ static void straight_line_log_start(const straight_line_start_log_t *log)
  */
 static void straight_line_log_report(const straight_line_report_t *report)
 {
-    lc_printf("%s t=%lu dist=%ld arm=%u raw=0x%02X mask=0x%02X cnt=%u lost=%u ir=%u nav=%u yaw=%ld gzlp=%ld ycorr=%ld B_total=%ld A_total=%ld d_err=%ld d_corr=%ld B_spd=%ld A_spd=%ld v_tgt=%ld v_err=%ld P=%ld I=%ld D=%ld ff=%ld fb=%ld corr=%ld B_pwm=%ld A_pwm=%ld\r\n",
+    lc_printf("%s t=%lu dist=%ld arm=%u raw=0x%02X mask=0x%02X cnt=%u lost=%u ir=%u nav=%u yaw=%ld gzlp=%ld ycorr=%ld gcorr=%ld B_total=%ld A_total=%ld d_err=%ld d_corr=%ld B_spd=%ld A_spd=%ld v_tgt=%ld v_err=%ld P=%ld I=%ld D=%ld ff=%ld fb=%ld corr=%ld B_pwm=%ld A_pwm=%ld\r\n",
         report->config->tag,
         report->elapsed_ms,
         report->distance_count,
@@ -420,6 +502,7 @@ static void straight_line_log_report(const straight_line_report_t *report)
         (report->nav_ok != 0U) ? report->nav->yaw_relative_cdeg : 0,
         (report->nav_ok != 0U) ? report->nav->gyro_z_filtered_mdps : 0,
         report->yaw_correction,
+        report->gray_correction,
         report->motor_b_total,
         report->motor_a_total,
         report->drive->distance_error,
@@ -461,6 +544,7 @@ static void straight_line_log_runtime_report(
             .yaw_start_cdeg = runtime->yaw_start_cdeg,
             .yaw_target_cdeg = runtime->yaw_target_cdeg,
             .yaw_correction = runtime->yaw_correction,
+            .gray_correction = runtime->gray_correction,
             .correction = runtime->correction,
             .motor_b_total = runtime->motor_b_total,
             .motor_a_total = runtime->motor_a_total,
@@ -476,6 +560,9 @@ static void straight_line_log_runtime_report(
     if (runtime->jy62_report_elapsed_ms >= JY62_TASK_REPORT_PERIOD_MS) {
         runtime->jy62_report_elapsed_ms = 0;
         jy62_print_navigation_line(config->tag, runtime->elapsed_ms);
+        OLED_ShowYawDistance(nav->yaw_relative_cdeg,
+            encoder_get_calibration_distance_count() / COUNTS_PER_CM,
+            runtime->nav_ok);
     }
 }
 
@@ -553,10 +640,26 @@ static uint8_t run_straight_to_line_segment(
 
         straight_line_log_start(&start_log);
     }
-    TB6612_SetDifferential((int16_t)TASK1_RAMP_B_START_PWM,
-        (int16_t)TASK1_RAMP_A_START_PWM);
+    {
+        int32_t entry_b_pwm = (config->entry_b_pwm != 0) ? config->entry_b_pwm :
+            TASK1_RAMP_B_START_PWM;
+        int32_t entry_a_pwm = (config->entry_a_pwm != 0) ? config->entry_a_pwm :
+            TASK1_RAMP_A_START_PWM;
 
-    while (runtime.elapsed_ms < TASK1_MAX_RUN_MS) {
+        if (config->pwm_percent != 0U) {
+            entry_b_pwm = (entry_b_pwm * config->pwm_percent) / 100;
+            entry_a_pwm = (entry_a_pwm * config->pwm_percent) / 100;
+        }
+        TB6612_SetDifferential((int16_t)entry_b_pwm,
+            (int16_t)entry_a_pwm);
+    }
+
+    while (1) {
+#if !(APP_HAND_PUSH_CALIBRATION_MODE && APP_HAND_PUSH_DISABLE_TIMEOUT)
+        if (runtime.elapsed_ms >= TASK1_MAX_RUN_MS) {
+            break;
+        }
+#endif
         delay_ms_with_st011(CONTROL_PERIOD_MS);
         runtime.elapsed_ms += CONTROL_PERIOD_MS;
         runtime.report_elapsed_ms += CONTROL_PERIOD_MS;
