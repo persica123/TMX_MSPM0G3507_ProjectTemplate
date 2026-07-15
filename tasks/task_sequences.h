@@ -32,6 +32,7 @@ static void run_task1_ab(void)
         .force_stop_count = TASK1_FORCE_STOP_COUNT,
         .stop_min_ir_count = TASK1_STOP_MIN_IR_COUNT,
         .yaw_corr_enable = 1U,
+        .task2_ab_yaw_tuning = 0U,
         .entry_brake_enable = 1U,
         .fixed_yaw_target_enable = 0U,
         .fixed_yaw_target_cdeg = 0
@@ -58,6 +59,8 @@ static void run_task2_abcd(void)
 {
     uint8_t reason;
 
+    encoder_reset_calibration_distance_count();
+
     {
         const straight_line_segment_config_t config = {
             .tag = "TASK2_AB",
@@ -69,9 +72,11 @@ static void run_task2_abcd(void)
             .force_stop_count = TASK1_FORCE_STOP_COUNT,
             .stop_min_ir_count = TASK1_STOP_MIN_IR_COUNT,
             .yaw_corr_enable = 1U,
+            .task2_ab_yaw_tuning = 1U,
             .entry_brake_enable = 1U,
             .fixed_yaw_target_enable = 0U,
-            .fixed_yaw_target_cdeg = 0
+            .fixed_yaw_target_cdeg = 0,
+            .pwm_percent = TASK2_STRAIGHT_PWM_PERCENT
         };
 
         reason = run_straight_to_line_segment(&config);
