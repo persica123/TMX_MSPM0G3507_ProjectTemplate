@@ -135,9 +135,12 @@ static const uint8_t *OLED_GetGlyph(char c)
     static const uint8_t letter_i[5U] = {0x00U, 0x44U, 0x7DU, 0x40U, 0x00U};
     static const uint8_t letter_l[5U] = {0x00U, 0x41U, 0x7FU, 0x40U, 0x00U};
     static const uint8_t letter_o[5U] = {0x38U, 0x44U, 0x44U, 0x44U, 0x38U};
+    static const uint8_t letter_r[5U] = {0x7CU, 0x08U, 0x04U, 0x04U, 0x08U};
     static const uint8_t letter_t[5U] = {0x04U, 0x3FU, 0x44U, 0x40U, 0x20U};
     static const uint8_t letter_w[5U] = {0x3CU, 0x40U, 0x30U, 0x40U, 0x3CU};
     static const uint8_t letter_A[5U] = {0x7EU, 0x11U, 0x11U, 0x11U, 0x7EU};
+    static const uint8_t letter_B[5U] = {0x7FU, 0x49U, 0x49U, 0x49U, 0x36U};
+    static const uint8_t letter_C[5U] = {0x3EU, 0x41U, 0x41U, 0x41U, 0x22U};
     static const uint8_t letter_D[5U] = {0x7FU, 0x41U, 0x41U, 0x22U, 0x1CU};
     static const uint8_t letter_E[5U] = {0x7FU, 0x49U, 0x49U, 0x49U, 0x41U};
     static const uint8_t letter_J[5U] = {0x20U, 0x40U, 0x41U, 0x3FU, 0x01U};
@@ -167,10 +170,13 @@ static const uint8_t *OLED_GetGlyph(char c)
         case 'l': return letter_l;
         case 'm': return letter_m;
         case 'o': return letter_o;
+        case 'r': return letter_r;
         case 's': return letter_s;
         case 't': return letter_t;
         case 'w': return letter_w;
         case 'A': return letter_A;
+        case 'B': return letter_B;
+        case 'C': return letter_C;
         case 'D': return letter_D;
         case 'E': return letter_E;
         case 'J': return letter_J;
@@ -305,6 +311,26 @@ static void OLED_FormatDistanceLine(char *line, int32_t distance_cm)
     (void)OLED_AppendText(line, pos, "cm");
 }
 
+static void OLED_FormatSignedLine(char *line, const char *label, int32_t value)
+{
+    uint8_t pos;
+    uint32_t magnitude;
+
+    OLED_FillLine(line);
+    pos = OLED_AppendText(line, 0U, label);
+    pos = OLED_AppendText(line, pos, ":");
+    if (value < 0) {
+        if (pos < 21U) {
+            line[pos] = '-';
+            pos++;
+        }
+        magnitude = (uint32_t)(-value);
+    } else {
+        magnitude = (uint32_t)value;
+    }
+    (void)OLED_AppendUInt(line, pos, magnitude);
+}
+
 uint8_t OLED_Init(void)
 {
     static const uint8_t init_cmds[] = {
@@ -405,5 +431,34 @@ void OLED_ShowYawDistance(int32_t yaw_cdeg,
 
     OLED_FillLine(line);
     (void)OLED_AppendText(line, 0U, (valid != 0U) ? "OK" : "E");
+    OLED_PrintAt(6U, 0U, line);
+}
+
+void OLED_ShowYawDistanceError(int32_t yaw_cdeg,
+    int32_t distance_cm,
+    int32_t line_error,
+    const char *stage,
+    uint8_t line_valid)
+{
+    char line[22U];
+    uint8_t pos;
+
+    if (g_oled_ready == 0U) {
+        return;
+    }
+
+    OLED_FormatAngleLine(line, "Yaw", yaw_cdeg);
+    OLED_PrintAt(0U, 0U, line);
+
+    OLED_FormatDistanceLine(line, distance_cm);
+    OLED_PrintAt(2U, 0U, line);
+
+    OLED_FormatSignedLine(line, "Err", line_error);
+    OLED_PrintAt(4U, 0U, line);
+
+    OLED_FillLine(line);
+    pos = OLED_AppendText(line, 0U, (stage != 0) ? stage : "R");
+    pos = OLED_AppendText(line, pos, " ");
+    (void)OLED_AppendText(line, pos, (line_valid != 0U) ? "OK" : "E");
     OLED_PrintAt(6U, 0U, line);
 }

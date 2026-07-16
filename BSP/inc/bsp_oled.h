@@ -19,5 +19,10 @@ void OLED_ShowNavigation(int32_t yaw_cdeg,
 void OLED_ShowYawDistance(int32_t yaw_cdeg,
     int32_t distance_cm,
     uint8_t valid);
+void OLED_ShowYawDistanceError(int32_t yaw_cdeg,
+    int32_t distance_cm,
+    int32_t line_error,
+    const char *stage,
+    uint8_t line_valid);
 
 #endif /* _BSP_OLED_H */

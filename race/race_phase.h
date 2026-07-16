@@ -205,26 +205,26 @@ static int32_t race_task4_first_ac_ramp_base_pwm(int32_t full_base_pwm,
     return start_base_pwm + pwm_gain;
 }
 
-/* 第三问 CB 末端的平滑减速：到 B 点前保持灰度循迹，但把平移速度降到低速。 */
-static int32_t race_task3_cb_exit_decel_base_pwm(int32_t full_base_pwm,
+/* 第三问 CB/DA 共用的出口平滑减速。 */
+static int32_t race_task3_arc_exit_decel_base_pwm(int32_t full_base_pwm,
     int32_t phase_distance_count)
 {
-    int32_t ramp_count = TASK3_CB_B_POINT_COUNT -
-        TASK3_CB_EXIT_DECEL_START_COUNT;
+    int32_t ramp_count = TASK3_ARC_LENGTH_COUNT -
+        TASK3_ARC_EXIT_DECEL_START_COUNT;
     int32_t decel_distance;
     int32_t pwm_drop;
 
-    if ((full_base_pwm <= TASK3_CB_EXIT_MIN_BASE_PWM) ||
-        (phase_distance_count <= TASK3_CB_EXIT_DECEL_START_COUNT) ||
+    if ((full_base_pwm <= TASK3_ARC_EXIT_MIN_BASE_PWM) ||
+        (phase_distance_count <= TASK3_ARC_EXIT_DECEL_START_COUNT) ||
         (ramp_count <= 0)) {
         return full_base_pwm;
     }
-    if (phase_distance_count >= TASK3_CB_B_POINT_COUNT) {
-        return TASK3_CB_EXIT_MIN_BASE_PWM;
+    if (phase_distance_count >= TASK3_ARC_LENGTH_COUNT) {
+        return TASK3_ARC_EXIT_MIN_BASE_PWM;
     }
 
-    decel_distance = phase_distance_count - TASK3_CB_EXIT_DECEL_START_COUNT;
-    pwm_drop = ((full_base_pwm - TASK3_CB_EXIT_MIN_BASE_PWM) *
+    decel_distance = phase_distance_count - TASK3_ARC_EXIT_DECEL_START_COUNT;
+    pwm_drop = ((full_base_pwm - TASK3_ARC_EXIT_MIN_BASE_PWM) *
         decel_distance) / ramp_count;
     return full_base_pwm - pwm_drop;
 }
@@ -260,14 +260,14 @@ static int32_t race_move_towards(int32_t value, int32_t target,
 
 static void race_compute_loop_control(race_context_t *ctx,
     const race_phase_config_t *config,
-    uint8_t line_follow_enable)
+    uint8_t line_follow_enable,
+    uint8_t task3_arc_profile_enable)
 {
     uint8_t task4_mode = (ctx->target_laps == TASK4_LAP_COUNT) ? 1U : 0U;
-    uint8_t task3_arc_mode = ((ctx->target_laps == 1U) &&
-        (line_follow_enable != 0U) && (config->arc_mode != 0U)) ? 1U : 0U;
-    uint8_t task3_cb_exit_mode = ((task3_arc_mode != 0U) &&
-        (ctx->phase == 1U) &&
-        (ctx->phase_distance_count >= TASK3_CB_EXIT_DECEL_START_COUNT)) ?
+    uint8_t task3_arc_mode = ((task3_arc_profile_enable != 0U) &&
+        (config->arc_mode != 0U)) ? 1U : 0U;
+    uint8_t task3_arc_exit_mode = ((task3_arc_mode != 0U) &&
+        (ctx->phase_distance_count >= TASK3_ARC_EXIT_DECEL_START_COUNT)) ?
         1U : 0U;
     uint8_t line_sample_usable = ctx->line_valid;
     int32_t line_lost_turn_target;
@@ -297,7 +297,7 @@ static void race_compute_loop_control(race_context_t *ctx,
         line_turn_limit = TASK3_ARC_LINE_TURN_LIMIT;
         line_turn_slew_step = TASK3_ARC_LINE_TURN_SLEW_STEP;
     }
-    if (task3_cb_exit_mode != 0U) {
+    if (task3_arc_exit_mode != 0U) {
         line_error_filter_divisor = TASK3_CB_EXIT_LINE_FILTER_DIVISOR;
         line_turn_divisor = TASK3_CB_EXIT_LINE_TURN_DIVISOR;
         line_kd_divisor = TASK3_CB_EXIT_LINE_KD_DIVISOR;
@@ -317,8 +317,7 @@ static void race_compute_loop_control(race_context_t *ctx,
 
     if (config->arc_mode != 0U) {
         ctx->base_pwm = task4_mode ? RACE_TASK4_ARC_BASE_PWM :
-            ((task3_arc_mode != 0U) && (ctx->phase == 1U)) ?
-                TASK3_CB_ARC_BASE_PWM : RACE_ARC_BASE_PWM;
+            (task3_arc_mode != 0U) ? TASK3_ARC_BASE_PWM : RACE_ARC_BASE_PWM;
         if (task4_mode != 0U) {
             ctx->base_pwm = race_task4_decel_base_pwm(ctx->base_pwm,
                 RACE_ARC_BASE_PWM,
@@ -326,7 +325,8 @@ static void race_compute_loop_control(race_context_t *ctx,
                 RACE_TASK4_EXIT_DECEL_START_COUNT,
                 RACE_TASK4_EXIT_DECEL_RAMP_COUNT);
         } else if ((task3_arc_mode != 0U) && (ctx->phase == 1U)) {
-            ctx->base_pwm = race_task3_cb_exit_decel_base_pwm(ctx->base_pwm,
+            /* 仅 CB 在接近 B 点时执行线性平滑减速；DA 保持基础速度直到其他判据生效。 */
+            ctx->base_pwm = race_task3_arc_exit_decel_base_pwm(ctx->base_pwm,
                 ctx->phase_distance_count);
         }
         if (ctx->phase == 1U) {
@@ -509,7 +509,17 @@ static void race_compute_loop_control(race_context_t *ctx,
 static uint8_t race_check_phase_point(race_context_t *ctx,
     const race_phase_config_t *config)
 {
-    if (config->arc_mode == 0U) {
+    if ((ctx->target_laps == 1U) && (ctx->phase == 2U)) {
+        /*
+         * 第三问 BD 到 D 点只使用与 OLED Dis 同源的独立累计里程。
+         * 到达阈值后立即进入 D 点刹车、停稳和原地定角转向流程。
+         */
+        ctx->straight_point_candidate =
+            (encoder_get_calibration_distance_count() >=
+                TASK3_D_BRAKE_DISTANCE_COUNT) ? 1U : 0U;
+        ctx->straight_point_count = ctx->straight_point_candidate;
+        ctx->point_ready = ctx->straight_point_candidate;
+    } else if (config->arc_mode == 0U) {
         ctx->straight_point_candidate =
             ((ctx->phase_distance_count >= config->point_arm_count) &&
              (ctx->line_valid != 0U)) ? 1U : 0U;
@@ -576,6 +586,11 @@ static uint8_t race_check_straight_force_turn(const race_context_t *ctx,
         return (ctx->phase_distance_count >= force_count) ? 1U : 0U;
     }
     if (ctx->phase == 2U) {
+        if (ctx->target_laps == 1U) {
+            /* 第三问 D 点由累计 Dis 精确触发，禁止旧 BD 强制转向提前抢占。 */
+            return 0U;
+        }
+
         uint8_t task4_mode = (ctx->target_laps == TASK4_LAP_COUNT) ? 1U : 0U;
         int32_t force_count = task4_mode ? RACE_TASK4_BD_FORCE_TURN_COUNT :
             RACE_BD_FORCE_TURN_COUNT;
@@ -728,42 +743,54 @@ static uint8_t race_execute_point_action(const race_context_t *ctx)
         }
     } else if (ctx->phase == 2U) {
         uint8_t task4_mode = (ctx->target_laps == TASK4_LAP_COUNT) ? 1U : 0U;
-        const sensor_fast_turn_config_t turn_config = {
-            .tag = "RACE_D_RIGHT_TURN",
-            .motor_b_pwm = task4_mode ?
-                RACE_TASK4_ENTRY_RIGHT_TURN_B_PWM :
-                RACE_RIGHT_TURN_B_PWM,
-            .motor_a_pwm = task4_mode ?
-                RACE_TASK4_ENTRY_RIGHT_TURN_A_PWM :
-                RACE_RIGHT_TURN_A_PWM,
-            .slow_motor_b_pwm = task4_mode ?
-                RACE_TASK4_ENTRY_RIGHT_TURN_SLOW_B_PWM : RACE_RIGHT_TURN_SLOW_B_PWM,
-            .slow_motor_a_pwm = task4_mode ?
-                RACE_TASK4_ENTRY_RIGHT_TURN_SLOW_A_PWM : RACE_RIGHT_TURN_SLOW_A_PWM,
-            .stop_mask = RACE_IR_CENTER_4_MASK,
-            .forbid_mask = RACE_IR_CENTER_4_FORBID_MASK,
-            .stop_error_max = RACE_TURN_CENTER6_ERROR_MAX,
-            .line_stop_min_yaw_cdeg = task4_mode ? 0 :
-                TASK3_D_TURN_LINE_STOP_MIN_YAW_CDEG,
-            .yaw_stop_enable = 0U,
-            .yaw_stop_target_cdeg = 0,
-            .control_period_ms = task4_mode ?
-                RACE_TASK4_CONTROL_PERIOD_MS : TASK3_D_TURN_CONTROL_PERIOD_MS,
-            .edge_boost_mask = task4_mode ? 0U : RACE_IR_RIGHT_EDGE_MASK,
-            .edge_boost_ms = task4_mode ? 0U : TASK3_D_EDGE_BOOST_MS,
-            .edge_boost_motor_b_pwm = TASK3_D_EDGE_BOOST_B_PWM,
-            .edge_boost_motor_a_pwm = TASK3_D_EDGE_BOOST_A_PWM,
-            .skip_finish_brake = task4_mode ? 0U : 1U
-        };
         if (task4_mode != 0U) {
+            const sensor_fast_turn_config_t turn_config = {
+                .tag = "RACE_D_RIGHT_TURN",
+                .motor_b_pwm = RACE_TASK4_ENTRY_RIGHT_TURN_B_PWM,
+                .motor_a_pwm = RACE_TASK4_ENTRY_RIGHT_TURN_A_PWM,
+                .slow_motor_b_pwm = RACE_TASK4_ENTRY_RIGHT_TURN_SLOW_B_PWM,
+                .slow_motor_a_pwm = RACE_TASK4_ENTRY_RIGHT_TURN_SLOW_A_PWM,
+                .stop_mask = RACE_IR_CENTER_4_MASK,
+                .forbid_mask = RACE_IR_CENTER_4_FORBID_MASK,
+                .stop_error_max = RACE_TURN_CENTER6_ERROR_MAX,
+                .line_stop_min_yaw_cdeg = 0,
+                .yaw_stop_enable = 0U,
+                .yaw_stop_target_cdeg = 0,
+                .control_period_ms = RACE_TASK4_CONTROL_PERIOD_MS
+            };
             turn_success = race_advance_after_point("RACE_D_ADVANCE",
                 RACE_TASK4_POINT_ADVANCE_COUNT);
+            if (turn_success != 0U) {
+                turn_success = race_sensor_fast_turn(&turn_config);
+            }
         } else {
-            /* 第三问 D 点直接进入强制右转，不再插入制动等待。 */
-            turn_success = 1U;
-        }
-        if (turn_success != 0U) {
-            turn_success = race_sensor_fast_turn(&turn_config);
+            int32_t target_cdeg = normalize_cdeg(ctx->yaw_cdeg -
+                TASK3_D_GYRO_ENTRY_TURN_CDEG);
+            const gyro_turn_config_t turn_config = {
+                .tag = "RACE_D_GYRO_ENTRY",
+                .motor_b_pwm = RACE_RIGHT_TURN_B_PWM,
+                .motor_a_pwm = RACE_RIGHT_TURN_A_PWM,
+                .slow_motor_b_pwm = RACE_RIGHT_TURN_SLOW_B_PWM,
+                .slow_motor_a_pwm = RACE_RIGHT_TURN_SLOW_A_PWM,
+                .yaw_stop_target_cdeg = target_cdeg,
+                .predictive_stop_enable = 0U,
+                .predictive_stop_ms = 0,
+                .predictive_stop_min_gz_mdps = 0,
+                .control_period_ms = CONTROL_PERIOD_MS
+            };
+
+            TB6612_Brake();
+            OLED_ShowYawDistanceError(
+                ctx->yaw_cdeg,
+                encoder_get_calibration_distance_count() / COUNTS_PER_CM,
+                (ctx->ir_ok != 0U) ? ctx->sample.error : 0,
+                "D",
+                ctx->line_valid);
+            delay_ms_with_st011(TASK3_D_POINT_BRAKE_SETTLE_MS);
+            turn_success = race_gyro_turn_to_yaw(&turn_config);
+            if (turn_success != 0U) {
+                delay_ms_with_st011(TASK3_D_HANDOFF_BRAKE_MS);
+            }
         }
     } else if ((uint8_t)(ctx->lap_count + 1U) < ctx->target_laps) {
         int32_t target_cdeg = RACE_TASK4_AC_HEADING_TARGET_CDEG;
@@ -879,6 +906,7 @@ static void race_reset_segment_control(race_context_t *ctx)
     ctx->filtered_derivative = 0;
     ctx->last_turn = 0;
     ctx->line_lost_count = 0U;
+    ctx->line_control_seeded = 0U;
     ctx->report_elapsed_ms = 0;
     race_diff_pid_reset(&ctx->diff_pid);
 }

@@ -189,7 +189,7 @@
 #define TASK2_DA_ENTRY_A_PWM              (350)
 
 /* BC 出弧交接：在目标航向前先降速，再用低速消除残余角速度后进入 CD。 */
-#define TASK2_BC_EXIT_DECEL_START_DISTANCE_CM (95L)
+#define TASK2_BC_EXIT_DECEL_START_DISTANCE_CM (110L)
 #define TASK2_BC_EXIT_DECEL_START_COUNT \
     DISTANCE_CM_TO_COUNT(TASK2_BC_EXIT_DECEL_START_DISTANCE_CM)
 #define TASK2_BC_EXIT_PWM_PERCENT        (85)
@@ -293,7 +293,7 @@
 #define TASK3_BD_HEADING_CORR_DIVISOR      (5)
 #define TASK3_BD_HEADING_CORR_MAX          (170)
 /* BD 是进入 D 点前的高速直线，单独降速以缩短 D 点制动距离。 */
-#define TASK3_BD_STRAIGHT_BASE_PWM          (500)
+#define TASK3_BD_STRAIGHT_BASE_PWM          (400)
 #define TASK3_STRAIGHT_LINE_ARM_DISTANCE_CM     (92L)
 #define TASK3_STRAIGHT_FORCE_STOP_DISTANCE_CM   (174L)
 #define TASK3_STRAIGHT_SEARCH_START_DISTANCE_CM (92L)
@@ -326,13 +326,17 @@
 #define TASK3_ARC_MAX_RUN_MS          (12000)
 #define TASK3_ARC_REPORT_PERIOD_MS    (100)
 /* 第三问 CB 整段采用较低基础速度，优先保证 B 点交接可控而非追求弧线速度。 */
-#define TASK3_CB_ARC_BASE_PWM          (440)
+#define TASK3_CB_ARC_BASE_PWM          (540)
 /* CB 接近 B 点时先减小平移速度，给 B->D 定角转向留出稳定的初始姿态。 */
-#define TASK3_CB_EXIT_DECEL_DISTANCE_CM (65L)
+#define TASK3_CB_EXIT_DECEL_DISTANCE_CM (35L)
 #define TASK3_CB_EXIT_DECEL_START_COUNT \
     (TASK3_CB_B_POINT_COUNT - \
         DISTANCE_CM_TO_COUNT(TASK3_CB_EXIT_DECEL_DISTANCE_CM))
 #define TASK3_CB_EXIT_MIN_BASE_PWM     (140)
+/* CB/DA 公共弧线控制兼容别名；实际数值仍由上面的 CB 调参项统一决定。 */
+#define TASK3_ARC_BASE_PWM               (TASK3_CB_ARC_BASE_PWM)
+#define TASK3_ARC_EXIT_DECEL_START_COUNT (TASK3_CB_EXIT_DECEL_START_COUNT)
+#define TASK3_ARC_EXIT_MIN_BASE_PWM      (TASK3_CB_EXIT_MIN_BASE_PWM)
 /* B 点一经识别直接进入满 PWM 主动刹车，随后立即执行 B→D 定角转向。 */
 /* 第三问弧线以灰度闭环为主，轮速差只保留很小的入弯引导，不能压过灰度修正。 */
 #define TASK3_CB_ARC_ENTRY_TARGET_DIFF  (-16)
@@ -369,16 +373,48 @@
 #define TASK3_D_EDGE_BOOST_B_PWM            (680)
 #define TASK3_D_EDGE_BOOST_A_PWM            (-40)
 #define TASK3_D_TURN_CONTROL_PERIOD_MS       (10U)
-/* 第三问 DA 全段专用强响应灰度 PD；丢线时维持右转趋势，防止直走。 */
-#define TASK3_DA_PWM_PERCENT                (60)
-#define TASK3_DA_LINE_KP_NUM                (12)
+/* 找回 DA 中心线后保持主动制动一小段时间，消除强右转残余角速度再交给循迹。 */
+#define TASK3_D_HANDOFF_BRAKE_MS              (30U)
+/* DA 首帧只继承受限的线位和转向量，避免大误差直接产生阶跃差速。 */
+#define TASK3_DA_ENTRY_SEED_ERROR_LIMIT        (800)
+#define TASK3_DA_ENTRY_SEED_TURN_LIMIT         (80)
+/* 第三问按 OLED 独立累计 Dis 到 D 点停车；实测后只需修改该距离。 */
+#define TASK3_D_BRAKE_DISTANCE_CM               (345L)
+#define TASK3_D_BRAKE_DISTANCE_COUNT \
+    DISTANCE_CM_TO_COUNT(TASK3_D_BRAKE_DISTANCE_CM)
+#define TASK3_D_POINT_BRAKE_SETTLE_MS           (1000U)
+/* D 点停稳后原地按陀螺仪定角右转，再直接交给 DA 循迹。 */
+#define TASK3_D_GYRO_ENTRY_TURN_CDEG            (3000)
+/*
+ * 第三问 DA 专用灰度循迹参数。
+ * 初始值与拆分前实际使用的 TASK2 弧线参数完全一致，保证拆分本身不改变车况；
+ * 后续只修改本组 TASK3_DA_*，不会影响第二问或第三问 CB。
+ */
+#define TASK3_DA_ERROR_SIGN                 (-1)
+#define TASK3_DA_PWM_PERCENT                (72)
+#define TASK3_DA_LINE_TURN_BOOST_PERCENT    (90)
+#define TASK3_DA_LINE_KP_NUM                (10)
 #define TASK3_DA_LINE_KP_DEN                (100)
-#define TASK3_DA_LINE_KD_NUM                (8)
+#define TASK3_DA_LINE_KD_NUM                (3)
 #define TASK3_DA_LINE_KD_DEN                (100)
-#define TASK3_DA_LINE_TURN_LIMIT            (240)
-#define TASK3_DA_CONTROL_TURN_LIMIT         (200)
-#define TASK3_DA_TURN_SLEW_STEP             (50)
-#define TASK3_DA_LOST_TURN                  (170)
+#define TASK3_DA_LINE_TURN_LIMIT            (180)
+#define TASK3_DA_CONTROL_TURN_LIMIT         (130)
+#define TASK3_DA_LINE_ERROR_DEADBAND        (250)
+#define TASK3_DA_LINE_FILTER_DIVISOR        (3)
+#define TASK3_DA_ERROR_MAX_ACTIVE_COUNT     (5)
+#define TASK3_DA_ERROR_JUMP_LIMIT           (2000)
+#define TASK3_DA_DERIV_LIMIT                (360)
+#define TASK3_DA_DERIV_FILTER_DIVISOR       (3)
+#define TASK3_DA_TURN_SLEW_STEP             (28)
+#define TASK3_DA_LOST_TURN_DECAY_STEP       (35)
+#define TASK3_DA_ENTRY_DISTANCE_CM          (30L)
+#define TASK3_DA_ENTRY_COUNT \
+    DISTANCE_CM_TO_COUNT(TASK3_DA_ENTRY_DISTANCE_CM)
+#define TASK3_DA_ENTRY_PWM_PERCENT          (90)
+#define TASK3_DA_DECEL_START_DISTANCE_CM    (110L)
+#define TASK3_DA_DECEL_START_COUNT \
+    DISTANCE_CM_TO_COUNT(TASK3_DA_DECEL_START_DISTANCE_CM)
+#define TASK3_DA_DECEL_PWM_PERCENT          (85)
 
 /* 任务三当前竞速主流程使用的起跑对齐和直线航向。 */
 #define RACE_TASK3_START_ALIGN_ENABLE (1)
@@ -387,7 +423,7 @@
 #define RACE_TASK3_START_RIGHT_TURN_SLOW_B_PWM (RACE_EXIT_RIGHT_TURN_SLOW_B_PWM)
 #define RACE_TASK3_START_RIGHT_TURN_SLOW_A_PWM (RACE_EXIT_RIGHT_TURN_SLOW_A_PWM)
 #define RACE_TASK3_AC_HEADING_TARGET_CDEG (-3400)
-#define RACE_TASK3_BD_HEADING_TARGET_CDEG (-17600 + 3520)
+#define RACE_TASK3_BD_HEADING_TARGET_CDEG (-18300 + 3520)
 #define RACE_TASK3_AC_FORCE_TURN_DISTANCE_CM (118L)
 #define RACE_TASK3_AC_FORCE_TURN_COUNT \
     DISTANCE_CM_TO_COUNT(RACE_TASK3_AC_FORCE_TURN_DISTANCE_CM)

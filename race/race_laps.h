@@ -109,6 +109,7 @@ typedef struct {
     uint8_t line_valid;
     uint8_t line_lost_seen;
     uint8_t line_lost_count;
+    uint8_t line_control_seeded;
     uint8_t straight_point_candidate;
     uint8_t edge_point_seen;
     uint8_t point_ready;
@@ -227,6 +228,8 @@ static void task2_apply_arc_follow_control(race_context_t *ctx,
     uint8_t exit_decel_enable,
     uint8_t entry_slow_enable)
 {
+    uint8_t task3_da_mode = ((ctx->target_laps == 1U) &&
+        (ctx->phase == 3U)) ? 1U : 0U;
     int32_t line_turn;
     int32_t line_derivative;
     int32_t control_turn;
@@ -237,33 +240,73 @@ static void task2_apply_arc_follow_control(race_context_t *ctx,
     int32_t filter_delta;
     int32_t filter_step;
     int32_t error_delta;
+    int32_t error_sign = (task3_da_mode != 0U) ?
+        TASK3_DA_ERROR_SIGN : 1;
+    int32_t pwm_percent = (task3_da_mode != 0U) ?
+        TASK3_DA_PWM_PERCENT : TASK2_ARC_PWM_PERCENT;
+    int32_t turn_boost_percent = (task3_da_mode != 0U) ?
+        TASK3_DA_LINE_TURN_BOOST_PERCENT : TASK2_ARC_TURN_BOOST_PERCENT;
+    int32_t line_kp_num = (task3_da_mode != 0U) ?
+        TASK3_DA_LINE_KP_NUM : TASK2_ARC_LINE_KP_NUM;
+    int32_t line_kp_den = (task3_da_mode != 0U) ?
+        TASK3_DA_LINE_KP_DEN : TASK2_ARC_LINE_KP_DEN;
+    int32_t line_kd_num = (task3_da_mode != 0U) ?
+        TASK3_DA_LINE_KD_NUM : TASK2_ARC_LINE_KD_NUM;
+    int32_t line_kd_den = (task3_da_mode != 0U) ?
+        TASK3_DA_LINE_KD_DEN : TASK2_ARC_LINE_KD_DEN;
+    int32_t line_turn_limit = (task3_da_mode != 0U) ?
+        TASK3_DA_LINE_TURN_LIMIT : TASK2_ARC_LINE_TURN_LIMIT;
+    int32_t control_turn_limit = (task3_da_mode != 0U) ?
+        TASK3_DA_CONTROL_TURN_LIMIT : TASK2_ARC_CONTROL_TURN_LIMIT;
+    int32_t error_deadband = (task3_da_mode != 0U) ?
+        TASK3_DA_LINE_ERROR_DEADBAND : TASK2_ARC_LINE_ERROR_DEADBAND;
+    int32_t error_filter_divisor = (task3_da_mode != 0U) ?
+        TASK3_DA_LINE_FILTER_DIVISOR : TASK2_ARC_LINE_FILTER_DIVISOR;
+    int32_t error_max_active_count = (task3_da_mode != 0U) ?
+        TASK3_DA_ERROR_MAX_ACTIVE_COUNT : TASK2_ARC_ERROR_MAX_ACTIVE_COUNT;
+    int32_t error_jump_limit = (task3_da_mode != 0U) ?
+        TASK3_DA_ERROR_JUMP_LIMIT : TASK2_ARC_ERROR_JUMP_LIMIT;
+    int32_t deriv_limit = (task3_da_mode != 0U) ?
+        TASK3_DA_DERIV_LIMIT : RACE_LINE_DERIV_LIMIT;
+    int32_t deriv_filter_divisor = (task3_da_mode != 0U) ?
+        TASK3_DA_DERIV_FILTER_DIVISOR : RACE_LINE_DERIV_FILTER_DIVISOR;
+    int32_t turn_slew_step = (task3_da_mode != 0U) ?
+        TASK3_DA_TURN_SLEW_STEP : RACE_LINE_TURN_SLEW_STEP;
+    int32_t lost_turn_decay_step = (task3_da_mode != 0U) ?
+        TASK3_DA_LOST_TURN_DECAY_STEP : RACE_LINE_LOST_TURN_DECAY_STEP;
+    int32_t entry_count = (task3_da_mode != 0U) ?
+        TASK3_DA_ENTRY_COUNT : TASK2_DA_ENTRY_COUNT;
+    int32_t entry_pwm_percent = (task3_da_mode != 0U) ?
+        TASK3_DA_ENTRY_PWM_PERCENT : TASK2_DA_ENTRY_PWM_PERCENT;
+    int32_t decel_start_count = (task3_da_mode != 0U) ?
+        TASK3_DA_DECEL_START_COUNT : TASK2_BC_EXIT_DECEL_START_COUNT;
+    int32_t decel_pwm_percent = (task3_da_mode != 0U) ?
+        TASK3_DA_DECEL_PWM_PERCENT : TASK2_BC_EXIT_PWM_PERCENT;
 
     if ((ctx->line_valid != 0U) &&
-        (ctx->sample.active_count <= TASK2_ARC_ERROR_MAX_ACTIVE_COUNT)) {
+        (ctx->sample.active_count <= error_max_active_count)) {
         line_error = (abs_i32(ctx->sample.error) <=
-            TASK2_ARC_LINE_ERROR_DEADBAND) ? 0 : ctx->sample.error;
+            error_deadband) ? 0 : (ctx->sample.error * error_sign);
         error_delta = line_error - ctx->filtered_error;
         line_error = ctx->filtered_error + clamp_i32(error_delta,
-            -TASK2_ARC_ERROR_JUMP_LIMIT,
-            TASK2_ARC_ERROR_JUMP_LIMIT);
+            -error_jump_limit,
+            error_jump_limit);
         filter_delta = line_error - ctx->filtered_error;
         filter_step = race_filter_step(filter_delta,
-            TASK2_ARC_LINE_FILTER_DIVISOR);
+            error_filter_divisor);
         ctx->filtered_error += filter_step;
         filtered_line_error = ctx->filtered_error;
         line_derivative = clamp_i32(filtered_line_error - ctx->last_filtered_error,
-            -RACE_LINE_DERIV_LIMIT,
-            RACE_LINE_DERIV_LIMIT);
+            -deriv_limit,
+            deriv_limit);
         ctx->filtered_derivative += race_filter_step(line_derivative -
-            ctx->filtered_derivative, RACE_LINE_DERIV_FILTER_DIVISOR);
+            ctx->filtered_derivative, deriv_filter_divisor);
         line_turn =
-            ((filtered_line_error * TASK2_ARC_LINE_KP_NUM) /
-                TASK2_ARC_LINE_KP_DEN) +
-            ((ctx->filtered_derivative * TASK2_ARC_LINE_KD_NUM) /
-                TASK2_ARC_LINE_KD_DEN);
+            ((filtered_line_error * line_kp_num) / line_kp_den) +
+            ((ctx->filtered_derivative * line_kd_num) / line_kd_den);
         line_turn = clamp_i32(line_turn,
-            -TASK2_ARC_LINE_TURN_LIMIT,
-            TASK2_ARC_LINE_TURN_LIMIT);
+            -line_turn_limit,
+            line_turn_limit);
         ctx->last_filtered_error = filtered_line_error;
         ctx->line_lost_count = 0U;
     } else if (ctx->last_turn != 0) {
@@ -271,31 +314,31 @@ static void task2_apply_arc_follow_control(race_context_t *ctx,
             ctx->line_lost_count++;
         }
         line_turn = race_move_towards(ctx->last_turn, 0,
-            RACE_LINE_LOST_TURN_DECAY_STEP);
+            lost_turn_decay_step);
     } else {
         line_turn = 0;
     }
 
     line_turn = race_move_towards(ctx->last_turn, line_turn,
-        RACE_LINE_TURN_SLEW_STEP);
+        turn_slew_step);
     ctx->last_turn = line_turn;
 
     control_turn = clamp_i32(line_turn + ctx->nav_turn,
-        -TASK2_ARC_CONTROL_TURN_LIMIT,
-        TASK2_ARC_CONTROL_TURN_LIMIT);
-    control_turn = (control_turn * TASK2_ARC_TURN_BOOST_PERCENT) / 100;
+        -control_turn_limit,
+        control_turn_limit);
+    control_turn = (control_turn * turn_boost_percent) / 100;
 
-    base_b_pwm = (ctx->drive.motor_b_pwm * TASK2_ARC_PWM_PERCENT) / 100;
-    base_a_pwm = (ctx->drive.motor_a_pwm * TASK2_ARC_PWM_PERCENT) / 100;
+    base_b_pwm = (ctx->drive.motor_b_pwm * pwm_percent) / 100;
+    base_a_pwm = (ctx->drive.motor_a_pwm * pwm_percent) / 100;
     if ((entry_slow_enable != 0U) &&
-        (ctx->phase_distance_count < TASK2_DA_ENTRY_COUNT)) {
-        base_b_pwm = (base_b_pwm * TASK2_DA_ENTRY_PWM_PERCENT) / 100;
-        base_a_pwm = (base_a_pwm * TASK2_DA_ENTRY_PWM_PERCENT) / 100;
+        (ctx->phase_distance_count < entry_count)) {
+        base_b_pwm = (base_b_pwm * entry_pwm_percent) / 100;
+        base_a_pwm = (base_a_pwm * entry_pwm_percent) / 100;
     }
     if ((exit_decel_enable != 0U) &&
-        (ctx->phase_distance_count >= TASK2_BC_EXIT_DECEL_START_COUNT)) {
-        base_b_pwm = (base_b_pwm * TASK2_BC_EXIT_PWM_PERCENT) / 100;
-        base_a_pwm = (base_a_pwm * TASK2_BC_EXIT_PWM_PERCENT) / 100;
+        (ctx->phase_distance_count >= decel_start_count)) {
+        base_b_pwm = (base_b_pwm * decel_pwm_percent) / 100;
+        base_a_pwm = (base_a_pwm * decel_pwm_percent) / 100;
     }
 
     ctx->line_turn = line_turn;
@@ -309,67 +352,41 @@ static void task2_apply_arc_follow_control(race_context_t *ctx,
 }
 
 /**
- * @brief 第三问 D 点强转后 DA 全段的专用灰度 PD。
+ * @brief DA 首次拿到有效线位时，用真实灰度误差直接初始化循迹状态。
  *
- * 此函数完全替代第二问 PID，缩短“强转完成到循迹接管”的交接区，
- * 并保持整段 DA 的快速灰度响应。
+ * D 点转向结束后阶段复位会把滤波误差和 last_turn 清零。如果 DA 已经以
+ * 较大偏差接管，继续从零滤波和限速爬升会来不及纠偏。这里仅在 DA 的
+ * 第一帧可用窄线出现时执行一次，后续仍完全使用 CB 共用的灰度 PD。
  */
-static void task3_apply_da_strong_follow_control(race_context_t *ctx)
+static void task3_seed_da_follow_control(race_context_t *ctx)
 {
-    int32_t line_error;
-    int32_t line_derivative;
-    int32_t line_turn;
-    int32_t control_turn;
-    int32_t base_b_pwm;
-    int32_t base_a_pwm;
-    int32_t filter_step;
+    int32_t seed_error;
+    int32_t seed_turn;
 
-    if ((ctx->line_valid != 0U) &&
-        (ctx->sample.active_count <= TASK2_ARC_ERROR_MAX_ACTIVE_COUNT)) {
-        line_error = (abs_i32(ctx->sample.error) <=
-            TASK2_ARC_LINE_ERROR_DEADBAND) ? 0 : ctx->sample.error;
-        filter_step = race_filter_step(line_error - ctx->filtered_error,
-            TASK2_ARC_LINE_FILTER_DIVISOR);
-        ctx->filtered_error += filter_step;
-        line_derivative = clamp_i32(ctx->filtered_error -
-            ctx->last_filtered_error,
-            -RACE_LINE_DERIV_LIMIT,
-            RACE_LINE_DERIV_LIMIT);
-        ctx->filtered_derivative += race_filter_step(line_derivative -
-            ctx->filtered_derivative, RACE_LINE_DERIV_FILTER_DIVISOR);
-        ctx->last_filtered_error = ctx->filtered_error;
-        line_turn = ((ctx->filtered_error * TASK3_DA_LINE_KP_NUM) /
-            TASK3_DA_LINE_KP_DEN) +
-            ((ctx->filtered_derivative * TASK3_DA_LINE_KD_NUM) /
-            TASK3_DA_LINE_KD_DEN);
-        line_turn = clamp_i32(line_turn,
-            -TASK3_DA_LINE_TURN_LIMIT,
-            TASK3_DA_LINE_TURN_LIMIT);
-        ctx->line_lost_count = 0U;
-    } else {
-        line_turn = TASK3_ARC_TURN_RIGHT * TASK3_DA_LOST_TURN;
-        if (ctx->line_lost_count < 255U) {
-            ctx->line_lost_count++;
-        }
+    if ((ctx->phase != 3U) || (ctx->line_control_seeded != 0U) ||
+        (ctx->line_valid == 0U) ||
+        (ctx->sample.active_count > TASK3_DA_ERROR_MAX_ACTIVE_COUNT)) {
+        return;
     }
 
-    line_turn = race_move_towards(ctx->last_turn, line_turn,
-        TASK3_DA_TURN_SLEW_STEP);
-    ctx->last_turn = line_turn;
-    control_turn = clamp_i32(line_turn + ctx->nav_turn,
-        -TASK3_DA_CONTROL_TURN_LIMIT,
-        TASK3_DA_CONTROL_TURN_LIMIT);
-    base_b_pwm = (ctx->drive.motor_b_pwm * TASK3_DA_PWM_PERCENT) / 100;
-    base_a_pwm = (ctx->drive.motor_a_pwm * TASK3_DA_PWM_PERCENT) / 100;
+    seed_error = (abs_i32(ctx->sample.error) <=
+        TASK3_DA_LINE_ERROR_DEADBAND) ? 0 :
+        (ctx->sample.error * TASK3_DA_ERROR_SIGN);
+    seed_error = clamp_i32(seed_error,
+        -TASK3_DA_ENTRY_SEED_ERROR_LIMIT,
+        TASK3_DA_ENTRY_SEED_ERROR_LIMIT);
+    seed_turn = ((seed_error * TASK3_DA_LINE_KP_NUM) /
+        TASK3_DA_LINE_KP_DEN);
+    seed_turn = clamp_i32(seed_turn,
+        -TASK3_DA_ENTRY_SEED_TURN_LIMIT,
+        TASK3_DA_ENTRY_SEED_TURN_LIMIT);
 
-    ctx->line_turn = line_turn;
-    ctx->control_turn = control_turn;
-    ctx->left_pwm = clamp_i32(base_b_pwm + control_turn,
-        RACE_LINE_MIN_PWM,
-        RACE_LINE_MAX_PWM);
-    ctx->right_pwm = clamp_i32(base_a_pwm - control_turn,
-        RACE_LINE_MIN_PWM,
-        RACE_LINE_MAX_PWM);
+    ctx->filtered_error = seed_error;
+    ctx->last_filtered_error = seed_error;
+    ctx->filtered_derivative = 0;
+    ctx->last_turn = seed_turn;
+    ctx->line_lost_count = 0U;
+    ctx->line_control_seeded = 1U;
 }
 
 /*
@@ -480,7 +497,7 @@ static uint8_t run_task2_race_arc_phase(const char *tag,
         }
 
         race_update_loop_state(&ctx, &phase_config);
-        race_compute_loop_control(&ctx, &phase_config, 0U);
+        race_compute_loop_control(&ctx, &phase_config, 0U, 0U);
         /*
          * BC、DA 都采用同一套灰度 PD、同一限幅和同一出弧降速曲线。
          * 两段只允许在“何时结束”上不同，不能让终点判定反过来改变
@@ -644,25 +661,24 @@ static void run_race_laps(uint8_t target_laps)
             int32_t total_distance_count =
                 encoder_get_calibration_distance_count();
 
-            OLED_ShowYawDistance(ctx.yaw_cdeg,
+            OLED_ShowYawDistanceError(ctx.yaw_cdeg,
                 total_distance_count / COUNTS_PER_CM,
-                ctx.nav_ok);
+                (ctx.ir_ok != 0U) ? ctx.sample.error : 0,
+                phase_config.phase_name,
+                ctx.line_valid);
             oled_elapsed_ms = 0U;
         }
         task3_use_task2_arc_follow = ((ctx.target_laps == 1U) &&
             (phase_config.arc_mode != 0U)) ? 1U : 0U;
         race_compute_loop_control(&ctx, &phase_config,
-            (task3_use_task2_arc_follow != 0U) ? 0U : 1U);
+            (task3_use_task2_arc_follow != 0U) ? 0U : 1U,
+            task3_use_task2_arc_follow);
         if (task3_use_task2_arc_follow != 0U) {
-            if (ctx.phase == 3U) {
-                /* 第三问 DA 全段采用独立的强响应灰度 PD，不再切回任务二参数。 */
-                task3_apply_da_strong_follow_control(&ctx);
-            } else {
-                /* 第三问 CB 仍直接复用第二问已验证的数字灰度循迹。 */
-                task2_apply_arc_follow_control(&ctx,
-                    (ctx.phase == 1U) ? 1U : 0U,
-                    0U);
-            }
+            /* 第三问 CB/DA 共用同一速度比例、灰度 PD、限幅和出口减速。 */
+            task3_seed_da_follow_control(&ctx);
+            task2_apply_arc_follow_control(&ctx,
+                1U,
+                (ctx.phase == 3U) ? 1U : 0U);
         }
 
         if (race_check_phase_point(&ctx, &phase_config) != 0U) {

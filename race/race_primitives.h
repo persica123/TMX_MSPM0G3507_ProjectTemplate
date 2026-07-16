@@ -281,6 +281,20 @@ typedef struct {
     uint8_t edge_boost_active;
 } race_sensor_fast_turn_state_t;
 
+static const char *race_sensor_fast_turn_oled_stage(
+    const sensor_fast_turn_config_t *config)
+{
+    if ((config != 0) && (config->tag != 0)) {
+        if (config->tag[5] == 'C') {
+            return "C";
+        }
+        if (config->tag[5] == 'D') {
+            return "D";
+        }
+    }
+    return "R";
+}
+
 /**
  * @brief 判断是否应对单侧边缘线施加短时增强转向。
  */
@@ -484,6 +498,12 @@ static void race_sensor_fast_turn_finish(
     state->ir_ok = IRTracking_ReadSample(&state->sample);
     state->nav_ok = JY62_PeekNavigation(&state->nav);
     encoder_get_total_counts(&state->motor_b_total, &state->motor_a_total);
+    OLED_ShowYawDistanceError(
+        (state->nav_ok != 0U) ? state->nav.yaw_relative_cdeg : 0,
+        encoder_get_calibration_distance_count() / COUNTS_PER_CM,
+        (state->ir_ok != 0U) ? state->sample.error : 0,
+        race_sensor_fast_turn_oled_stage(config),
+        ((state->ir_ok != 0U) && (state->sample.line_lost == 0U)) ? 1U : 0U);
     race_log_printf("%s stop: reason=%s t=%lu nav=%u yaw=%ld target=%ld yerr=%ld gzlp=%ld ir=%u raw=0x%02X mask=0x%02X cnt=%u lost=%u err=%ld B=%ld A=%ld slow=%u boost=%u yaw_ready=%u\r\n",
         config->tag,
         race_sensor_fast_turn_stop_reason_name(state->stop_reason),
@@ -533,10 +553,12 @@ static uint8_t race_sensor_fast_turn(
         race_sensor_fast_turn_update(config, &state);
 
         if (state.line_stop_ready != 0U) {
+            TB6612_Brake();
             state.stop_reason = 1U;
             break;
         }
         if (state.yaw_stop_ready != 0U) {
+            TB6612_Brake();
             state.stop_reason = 6U;
             break;
         }
