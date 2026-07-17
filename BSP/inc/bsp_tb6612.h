@@ -61,6 +61,8 @@ void TB6612_Enable(void);
 void TB6612_Disable(void);
 /** 主动刹车两个车轮。 */
 void TB6612_Brake(void);
+/** 按给定 B 左轮、A 右轮 PWM 执行可调力度主动刹车。 */
+void TB6612_BrakePwm(uint16_t motor_b_pwm, uint16_t motor_a_pwm);
 /** 关闭桥臂驱动，让两个车轮滑行。 */
 void TB6612_Coast(void);
 /** 设置单个电机速度；符号表示方向，绝对值表示 PWM。 */

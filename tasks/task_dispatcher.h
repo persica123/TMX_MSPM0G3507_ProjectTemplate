@@ -52,7 +52,7 @@ static void run_selected_task(task_id_t task_id)
         run_race_laps(1U);
     } else if (task_id == TASK_ID_4) {
 #if APP_ENABLE_TASK4
-        run_race_laps(4U);
+        run_task4_laps();
 #else
         TB6612_Brake();
         lc_printf("TASK4 disabled while task3 is being tuned\r\n");

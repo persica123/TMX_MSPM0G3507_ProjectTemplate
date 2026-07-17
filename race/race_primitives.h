@@ -43,14 +43,15 @@ static uint8_t race_peek_yaw(int32_t *yaw_cdeg, int32_t *gyro_z_filtered_mdps)
 /**
  * @brief 复位竞速差速轮速 PID 参数。
  */
-static void race_diff_pid_reset(straight_pid_t *pid)
+static void race_diff_pid_reset(straight_pid_t *pid, uint8_t task4_mode)
 {
     straight_pid_reset(pid);
-    pid->kp = RACE_DIFF_KP;
+    pid->kp = (task4_mode != 0U) ? RACE_TASK4_DIFF_KP : RACE_DIFF_KP;
     pid->ki = 0;
-    pid->kd = RACE_DIFF_KD;
+    pid->kd = (task4_mode != 0U) ? RACE_TASK4_DIFF_KD : RACE_DIFF_KD;
     pid->i_limit = 0;
-    pid->corr_max = RACE_DIFF_CORR_MAX;
+    pid->corr_max = (task4_mode != 0U) ?
+        RACE_TASK4_DIFF_CORR_MAX : RACE_DIFF_CORR_MAX;
     pid->integral = 0;
     pid->last_error = 0;
 }
@@ -60,17 +61,21 @@ static void race_diff_pid_reset(straight_pid_t *pid)
  */
 static void race_drive_config(straight_drive_config_t *config,
     int32_t base_pwm,
-    int32_t target_speed_diff)
+    int32_t target_speed_diff,
+    uint8_t task4_mode)
 {
     config->base_b_pwm = base_pwm;
     config->base_a_pwm = base_pwm;
     config->target_speed_diff = target_speed_diff;
-    config->diff_ff_gain = RACE_DIFF_FF_GAIN;
+    config->diff_ff_gain = (task4_mode != 0U) ?
+        RACE_TASK4_DIFF_FF_GAIN : RACE_DIFF_FF_GAIN;
     config->distance_corr_divisor = 1;
     config->distance_corr_max = 0;
-    config->correction_max = RACE_DIFF_CORR_MAX;
-    config->min_pwm = RACE_LINE_MIN_PWM;
-    config->max_pwm = (base_pwm > RACE_LINE_MAX_PWM) ?
+    config->correction_max = (task4_mode != 0U) ?
+        RACE_TASK4_DIFF_CORR_MAX : RACE_DIFF_CORR_MAX;
+    config->min_pwm = (task4_mode != 0U) ?
+        RACE_TASK4_LINE_MIN_PWM : RACE_LINE_MIN_PWM;
+    config->max_pwm = (task4_mode != 0U) ?
         RACE_TASK4_LINE_MAX_PWM : RACE_LINE_MAX_PWM;
 }
 
@@ -614,6 +619,8 @@ static uint8_t race_gyro_turn_to_yaw(
     uint8_t predictive_stop_ready = 0U;
     uint32_t control_period_ms = (config->control_period_ms != 0U) ?
         config->control_period_ms : CONTROL_PERIOD_MS;
+    int32_t slow_zone_cdeg = (config->slow_zone_cdeg > 0) ?
+        config->slow_zone_cdeg : RACE_TURN_YAW_SLOW_ZONE_CDEG;
 
     encoder_reset_distance_counts();
     encoder_enable_interrupts();
@@ -629,7 +636,7 @@ static uint8_t race_gyro_turn_to_yaw(
     last_yaw_stop_error_cdeg = normalize_cdeg(turn_yaw_start -
         yaw_stop_target_cdeg);
     yaw_error_valid = 1U;
-    if (abs_i32(last_yaw_stop_error_cdeg) <= RACE_TURN_YAW_SLOW_ZONE_CDEG) {
+    if (abs_i32(last_yaw_stop_error_cdeg) <= slow_zone_cdeg) {
         slow_mode = 1U;
     }
     TB6612_SetDifferential((slow_mode != 0U) ? slow_motor_b_pwm : motor_b_pwm,
@@ -696,7 +703,7 @@ static uint8_t race_gyro_turn_to_yaw(
         yaw_error_valid = 1U;
 
         if ((slow_mode == 0U) &&
-            (abs_i32(yaw_stop_error_cdeg) <= RACE_TURN_YAW_SLOW_ZONE_CDEG)) {
+            (abs_i32(yaw_stop_error_cdeg) <= slow_zone_cdeg)) {
             slow_mode = 1U;
             TB6612_SetDifferential(slow_motor_b_pwm, slow_motor_a_pwm);
         }

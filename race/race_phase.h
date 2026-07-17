@@ -229,6 +229,47 @@ static int32_t race_task3_arc_exit_decel_base_pwm(int32_t full_base_pwm,
     return full_base_pwm - pwm_drop;
 }
 
+/* 第四问独立复制任务三 CB 末端减速，不引用 TASK3_* 参数。 */
+static int32_t race_task4_arc_exit_decel_base_pwm(int32_t full_base_pwm,
+    int32_t phase_distance_count)
+{
+    int32_t ramp_count = RACE_TASK4_ARC_LENGTH_COUNT -
+        RACE_TASK4_CB_EXIT_DECEL_START_COUNT;
+    int32_t decel_distance;
+    int32_t pwm_drop;
+
+    if ((full_base_pwm <= RACE_TASK4_CB_EXIT_MIN_BASE_PWM) ||
+        (phase_distance_count <= RACE_TASK4_CB_EXIT_DECEL_START_COUNT) ||
+        (ramp_count <= 0)) {
+        return full_base_pwm;
+    }
+    if (phase_distance_count >= RACE_TASK4_ARC_LENGTH_COUNT) {
+        return RACE_TASK4_CB_EXIT_MIN_BASE_PWM;
+    }
+
+    decel_distance = phase_distance_count -
+        RACE_TASK4_CB_EXIT_DECEL_START_COUNT;
+    pwm_drop = ((full_base_pwm - RACE_TASK4_CB_EXIT_MIN_BASE_PWM) *
+        decel_distance) / ramp_count;
+    return full_base_pwm - pwm_drop;
+}
+
+/* 第四问独立复制任务三半圆期望航向计算。 */
+static int32_t race_task4_arc_expected_yaw_cdeg(int32_t phase_distance_count,
+    int32_t phase_turn_dir)
+{
+    int32_t progress_cdeg;
+
+    if (phase_distance_count <= 0) {
+        return 0;
+    }
+
+    progress_cdeg = (phase_distance_count * 18000L) /
+        RACE_TASK4_ARC_LENGTH_COUNT;
+    progress_cdeg = clamp_i32(progress_cdeg, 0, 18000);
+    return -phase_turn_dir * progress_cdeg;
+}
+
 /**
  * @brief 计算巡线转向、航向转向、轮速差速闭环和最终 PWM。
  */
@@ -266,44 +307,117 @@ static void race_compute_loop_control(race_context_t *ctx,
     uint8_t task4_mode = (ctx->target_laps == TASK4_LAP_COUNT) ? 1U : 0U;
     uint8_t task3_arc_mode = ((task3_arc_profile_enable != 0U) &&
         (config->arc_mode != 0U)) ? 1U : 0U;
+    uint8_t task4_task3_profile = ((task4_mode != 0U) &&
+        (task3_arc_mode != 0U)) ? 1U : 0U;
+    int32_t profile_exit_start_count = (task4_task3_profile != 0U) ?
+        RACE_TASK4_CB_EXIT_DECEL_START_COUNT : TASK3_ARC_EXIT_DECEL_START_COUNT;
     uint8_t task3_arc_exit_mode = ((task3_arc_mode != 0U) &&
-        (ctx->phase_distance_count >= TASK3_ARC_EXIT_DECEL_START_COUNT)) ?
+        (ctx->phase_distance_count >= profile_exit_start_count)) ?
         1U : 0U;
     uint8_t line_sample_usable = ctx->line_valid;
     int32_t line_lost_turn_target;
-    int32_t line_error_deadband = RACE_LINE_ERROR_DEADBAND;
-    int32_t line_error_filter_divisor = RACE_LINE_ERROR_FILTER_DIVISOR;
-    int32_t line_turn_divisor = RACE_LINE_TURN_DIVISOR;
-    int32_t line_kd_divisor = RACE_LINE_KD_DIVISOR;
-    int32_t line_turn_limit = RACE_LINE_TURN_LIMIT;
-    int32_t line_turn_slew_step = RACE_LINE_TURN_SLEW_STEP;
-    int32_t arc_control_turn_limit = RACE_LINE_TURN_LIMIT;
+    int32_t line_error_deadband = task4_mode ?
+        RACE_TASK4_LINE_ERROR_DEADBAND : RACE_LINE_ERROR_DEADBAND;
+    int32_t line_error_filter_divisor = task4_mode ?
+        RACE_TASK4_LINE_ERROR_FILTER_DIVISOR : RACE_LINE_ERROR_FILTER_DIVISOR;
+    int32_t line_turn_divisor = task4_mode ?
+        RACE_TASK4_LINE_TURN_DIVISOR : RACE_LINE_TURN_DIVISOR;
+    int32_t line_kd_divisor = task4_mode ?
+        RACE_TASK4_LINE_KD_DIVISOR : RACE_LINE_KD_DIVISOR;
+    int32_t line_turn_limit = task4_mode ?
+        RACE_TASK4_LINE_TURN_LIMIT : RACE_LINE_TURN_LIMIT;
+    int32_t line_turn_slew_step = task4_mode ?
+        RACE_TASK4_LINE_TURN_SLEW_STEP : RACE_LINE_TURN_SLEW_STEP;
+    int32_t line_deriv_limit = task4_mode ?
+        RACE_TASK4_LINE_DERIV_LIMIT : RACE_LINE_DERIV_LIMIT;
+    int32_t line_deriv_filter_divisor = task4_mode ?
+        RACE_TASK4_LINE_DERIV_FILTER_DIVISOR : RACE_LINE_DERIV_FILTER_DIVISOR;
+    int32_t line_lost_hold_cycles = task4_mode ?
+        RACE_TASK4_LINE_LOST_HOLD_CYCLES : RACE_LINE_LOST_HOLD_CYCLES;
+    int32_t line_lost_turn_decay_step = task4_mode ?
+        RACE_TASK4_LINE_LOST_TURN_DECAY_STEP : RACE_LINE_LOST_TURN_DECAY_STEP;
+    int32_t line_lost_base_drop = task4_mode ?
+        RACE_TASK4_LINE_LOST_BASE_DROP : RACE_LINE_LOST_BASE_DROP;
+    int32_t line_lost_turn = task4_mode ?
+        RACE_TASK4_LINE_LOST_TURN : RACE_LINE_LOST_TURN;
+    int32_t line_min_pwm = task4_mode ?
+        RACE_TASK4_LINE_MIN_PWM : RACE_LINE_MIN_PWM;
+    int32_t line_max_pwm = task4_mode ?
+        RACE_TASK4_LINE_MAX_PWM : RACE_LINE_MAX_PWM;
+    int32_t straight_gyro_nav_enable = task4_mode ?
+        RACE_TASK4_STRAIGHT_GYRO_NAV_ENABLE : RACE_STRAIGHT_GYRO_NAV_ENABLE;
+    int32_t straight_ir_assist_enable = task4_mode ?
+        RACE_TASK4_STRAIGHT_IR_ASSIST_ENABLE : RACE_STRAIGHT_IR_ASSIST_ENABLE;
+    int32_t straight_ir_assist_divisor = task4_mode ?
+        RACE_TASK4_STRAIGHT_IR_ASSIST_DIVISOR : RACE_STRAIGHT_IR_ASSIST_DIVISOR;
+    int32_t straight_heading_corr_divisor = task4_mode ?
+        RACE_TASK4_STRAIGHT_HEADING_CORR_DIVISOR :
+        RACE_STRAIGHT_HEADING_CORR_DIVISOR;
+    int32_t straight_heading_corr_max = task4_mode ?
+        RACE_TASK4_STRAIGHT_HEADING_CORR_MAX : RACE_STRAIGHT_HEADING_CORR_MAX;
+    int32_t straight_gyro_damp_divisor = task4_mode ?
+        RACE_TASK4_STRAIGHT_GYRO_DAMP_DIVISOR :
+        RACE_STRAIGHT_GYRO_DAMP_DIVISOR;
+    int32_t arc_yaw_nav_enable = task4_mode ?
+        RACE_TASK4_ARC_YAW_NAV_ENABLE : RACE_ARC_YAW_NAV_ENABLE;
+    int32_t arc_yaw_corr_divisor = task4_mode ?
+        RACE_TASK4_ARC_YAW_CORR_DIVISOR : RACE_ARC_YAW_CORR_DIVISOR;
+    int32_t arc_yaw_corr_max = task4_mode ?
+        RACE_TASK4_ARC_YAW_CORR_MAX : RACE_ARC_YAW_CORR_MAX;
+    int32_t arc_gyro_damp_divisor = task4_mode ?
+        RACE_TASK4_ARC_GYRO_DAMP_DIVISOR : RACE_ARC_GYRO_DAMP_DIVISOR;
+    int32_t arc_control_turn_limit = line_turn_limit;
     int32_t line_error_delta;
 
     if ((task3_arc_mode != 0U) &&
-        (ctx->sample.active_count >= TASK3_ARC_WIDE_LINE_MIN_COUNT)) {
+        (ctx->sample.active_count >= ((task4_task3_profile != 0U) ?
+            RACE_TASK4_ARC_PROFILE_WIDE_LINE_MIN_COUNT :
+            TASK3_ARC_WIDE_LINE_MIN_COUNT))) {
         /* 交叉/宽线的重心不代表弧线位置，不能送入 PD。 */
         line_sample_usable = 0U;
     }
     line_lost_turn_target = ((config->arc_mode != 0U) &&
         (task3_arc_mode == 0U)) ?
-        (config->phase_turn_dir * RACE_LINE_LOST_TURN) :
-        TASK3_ARC_LOST_TURN;
+        (config->phase_turn_dir * line_lost_turn) :
+        ((task4_task3_profile != 0U) ?
+            RACE_TASK4_ARC_PROFILE_LOST_TURN : TASK3_ARC_LOST_TURN);
     if (task3_arc_mode != 0U) {
-        line_error_deadband = TASK3_ARC_LINE_ERROR_DEADBAND;
-        line_error_filter_divisor = TASK3_ARC_LINE_ERROR_FILTER_DIVISOR;
-        line_turn_divisor = TASK3_ARC_LINE_TURN_DIVISOR;
-        line_kd_divisor = TASK3_ARC_LINE_KD_DIVISOR;
-        line_turn_limit = TASK3_ARC_LINE_TURN_LIMIT;
-        line_turn_slew_step = TASK3_ARC_LINE_TURN_SLEW_STEP;
+        line_error_deadband = (task4_task3_profile != 0U) ?
+            RACE_TASK4_ARC_PROFILE_ERROR_DEADBAND :
+            TASK3_ARC_LINE_ERROR_DEADBAND;
+        line_error_filter_divisor = (task4_task3_profile != 0U) ?
+            RACE_TASK4_ARC_PROFILE_FILTER_DIVISOR :
+            TASK3_ARC_LINE_ERROR_FILTER_DIVISOR;
+        line_turn_divisor = (task4_task3_profile != 0U) ?
+            RACE_TASK4_ARC_PROFILE_TURN_DIVISOR :
+            TASK3_ARC_LINE_TURN_DIVISOR;
+        line_kd_divisor = (task4_task3_profile != 0U) ?
+            RACE_TASK4_ARC_PROFILE_KD_DIVISOR : TASK3_ARC_LINE_KD_DIVISOR;
+        line_turn_limit = (task4_task3_profile != 0U) ?
+            RACE_TASK4_ARC_PROFILE_TURN_LIMIT : TASK3_ARC_LINE_TURN_LIMIT;
+        line_turn_slew_step = (task4_task3_profile != 0U) ?
+            RACE_TASK4_ARC_PROFILE_TURN_SLEW_STEP :
+            TASK3_ARC_LINE_TURN_SLEW_STEP;
     }
     if (task3_arc_exit_mode != 0U) {
-        line_error_filter_divisor = TASK3_CB_EXIT_LINE_FILTER_DIVISOR;
-        line_turn_divisor = TASK3_CB_EXIT_LINE_TURN_DIVISOR;
-        line_kd_divisor = TASK3_CB_EXIT_LINE_KD_DIVISOR;
-        line_turn_limit = TASK3_CB_EXIT_LINE_TURN_LIMIT;
-        line_turn_slew_step = TASK3_CB_EXIT_LINE_SLEW_STEP;
-        arc_control_turn_limit = TASK3_CB_EXIT_CONTROL_TURN_LIMIT;
+        line_error_filter_divisor = (task4_task3_profile != 0U) ?
+            RACE_TASK4_CB_EXIT_LINE_FILTER_DIVISOR :
+            TASK3_CB_EXIT_LINE_FILTER_DIVISOR;
+        line_turn_divisor = (task4_task3_profile != 0U) ?
+            RACE_TASK4_CB_EXIT_LINE_TURN_DIVISOR :
+            TASK3_CB_EXIT_LINE_TURN_DIVISOR;
+        line_kd_divisor = (task4_task3_profile != 0U) ?
+            RACE_TASK4_CB_EXIT_LINE_KD_DIVISOR :
+            TASK3_CB_EXIT_LINE_KD_DIVISOR;
+        line_turn_limit = (task4_task3_profile != 0U) ?
+            RACE_TASK4_CB_EXIT_LINE_TURN_LIMIT :
+            TASK3_CB_EXIT_LINE_TURN_LIMIT;
+        line_turn_slew_step = (task4_task3_profile != 0U) ?
+            RACE_TASK4_CB_EXIT_LINE_SLEW_STEP :
+            TASK3_CB_EXIT_LINE_SLEW_STEP;
+        arc_control_turn_limit = (task4_task3_profile != 0U) ?
+            RACE_TASK4_CB_EXIT_CONTROL_TURN_LIMIT :
+            TASK3_CB_EXIT_CONTROL_TURN_LIMIT;
     }
 
     ctx->raw_error = 0;
@@ -318,19 +432,21 @@ static void race_compute_loop_control(race_context_t *ctx,
     if (config->arc_mode != 0U) {
         ctx->base_pwm = task4_mode ? RACE_TASK4_ARC_BASE_PWM :
             (task3_arc_mode != 0U) ? TASK3_ARC_BASE_PWM : RACE_ARC_BASE_PWM;
-        if (task4_mode != 0U) {
-            ctx->base_pwm = race_task4_decel_base_pwm(ctx->base_pwm,
-                RACE_ARC_BASE_PWM,
-                ctx->phase_distance_count,
-                RACE_TASK4_EXIT_DECEL_START_COUNT,
-                RACE_TASK4_EXIT_DECEL_RAMP_COUNT);
+        if ((task4_task3_profile != 0U) && (ctx->phase == 1U)) {
+            ctx->base_pwm = race_task4_arc_exit_decel_base_pwm(ctx->base_pwm,
+                ctx->phase_distance_count);
         } else if ((task3_arc_mode != 0U) && (ctx->phase == 1U)) {
             /* 仅 CB 在接近 B 点时执行线性平滑减速；DA 保持基础速度直到其他判据生效。 */
             ctx->base_pwm = race_task3_arc_exit_decel_base_pwm(ctx->base_pwm,
                 ctx->phase_distance_count);
         }
         if (ctx->phase == 1U) {
-            if (task3_arc_mode != 0U) {
+            if (task4_mode != 0U) {
+                ctx->target_speed_diff =
+                    (ctx->phase_distance_count < TASK3_ARC_ENTRY_COUNT) ?
+                        RACE_TASK4_CB_ARC_ENTRY_TARGET_DIFF :
+                        RACE_TASK4_CB_ARC_CRUISE_TARGET_DIFF;
+            } else if (task3_arc_mode != 0U) {
                 ctx->target_speed_diff =
                     (ctx->phase_distance_count < TASK3_ARC_ENTRY_COUNT) ?
                         TASK3_CB_ARC_ENTRY_TARGET_DIFF :
@@ -342,7 +458,12 @@ static void race_compute_loop_control(race_context_t *ctx,
                         RACE_CB_ARC_CRUISE_TARGET_DIFF;
             }
         } else {
-            if (task3_arc_mode != 0U) {
+            if (task4_mode != 0U) {
+                ctx->target_speed_diff =
+                    (ctx->phase_distance_count < TASK3_ARC_ENTRY_COUNT) ?
+                        RACE_TASK4_DA_ARC_ENTRY_TARGET_DIFF :
+                        RACE_TASK4_DA_ARC_CRUISE_TARGET_DIFF;
+            } else if (task3_arc_mode != 0U) {
                 ctx->target_speed_diff =
                     (ctx->phase_distance_count < TASK3_ARC_ENTRY_COUNT) ?
                         TASK3_DA_ARC_ENTRY_TARGET_DIFF :
@@ -356,17 +477,9 @@ static void race_compute_loop_control(race_context_t *ctx,
         }
     } else {
         if (task4_mode != 0U) {
-            ctx->base_pwm = RACE_TASK4_STRAIGHT_BASE_PWM;
-            if ((ctx->lap_count == 0U) && (ctx->phase == 0U)) {
-                ctx->base_pwm = race_task4_first_ac_ramp_base_pwm(
-                    ctx->base_pwm,
-                    ctx->phase_distance_count);
-            }
-            ctx->base_pwm = race_task4_decel_base_pwm(ctx->base_pwm,
-                RACE_STRAIGHT_BASE_PWM,
-                ctx->phase_distance_count,
-                RACE_TASK4_ENTRY_DECEL_START_COUNT,
-                RACE_TASK4_ENTRY_DECEL_RAMP_COUNT);
+            ctx->base_pwm = (ctx->phase == 2U) ?
+                RACE_TASK4_BD_STRAIGHT_BASE_PWM :
+                RACE_TASK4_STRAIGHT_BASE_PWM;
             ctx->target_speed_diff = RACE_TASK4_STRAIGHT_TARGET_DIFF;
         } else {
             ctx->base_pwm = (ctx->phase == 2U) ?
@@ -376,11 +489,14 @@ static void race_compute_loop_control(race_context_t *ctx,
     }
 
     if ((line_sample_usable == 0U) &&
-        ((config->arc_mode != 0U) || (RACE_STRAIGHT_GYRO_NAV_ENABLE == 0))) {
-        ctx->base_pwm -= RACE_LINE_LOST_BASE_DROP;
+        ((config->arc_mode != 0U) || (straight_gyro_nav_enable == 0))) {
+        ctx->base_pwm -= line_lost_base_drop;
     }
 
-    race_drive_config(&ctx->drive_config, ctx->base_pwm, ctx->target_speed_diff);
+    race_drive_config(&ctx->drive_config,
+        ctx->base_pwm,
+        ctx->target_speed_diff,
+        task4_mode);
     straight_drive_update(&ctx->diff_pid,
         &ctx->drive_config,
         ctx->motor_b_delta,
@@ -392,19 +508,37 @@ static void race_compute_loop_control(race_context_t *ctx,
     if ((line_follow_enable != 0U) && (line_sample_usable != 0U)) {
         ctx->raw_error = (abs_i32(ctx->sample.error) <=
             line_error_deadband) ? 0 : ctx->sample.error;
+        if ((task4_mode != 0U) && (config->arc_mode != 0U) &&
+            (ctx->line_control_seeded == 0U)) {
+            /*
+             * 第四问入弯找线成功后的第一帧直接用真实误差初始化，
+             * 避免滤波器从零缓慢爬升，导致刚接管时纠偏不足。
+             */
+            ctx->filtered_error = ctx->raw_error;
+            ctx->last_filtered_error = ctx->raw_error;
+            ctx->filtered_derivative = 0;
+            ctx->last_turn = clamp_i32(
+                ctx->raw_error / line_turn_divisor,
+                -line_turn_limit,
+                line_turn_limit);
+            ctx->line_control_seeded = 1U;
+        }
         if (task3_arc_mode != 0U) {
             line_error_delta = ctx->raw_error - ctx->filtered_error;
+            int32_t error_jump_limit = (task4_task3_profile != 0U) ?
+                RACE_TASK4_ARC_PROFILE_ERROR_JUMP_LIMIT :
+                TASK3_ARC_LINE_ERROR_JUMP_LIMIT;
             ctx->raw_error = ctx->filtered_error + clamp_i32(line_error_delta,
-                -TASK3_ARC_LINE_ERROR_JUMP_LIMIT,
-                TASK3_ARC_LINE_ERROR_JUMP_LIMIT);
+                -error_jump_limit,
+                error_jump_limit);
         }
         ctx->filtered_error += race_filter_step(ctx->raw_error -
             ctx->filtered_error, line_error_filter_divisor);
         ctx->derivative = clamp_i32(ctx->filtered_error - ctx->last_filtered_error,
-            -RACE_LINE_DERIV_LIMIT,
-            RACE_LINE_DERIV_LIMIT);
+            -line_deriv_limit,
+            line_deriv_limit);
         ctx->filtered_derivative += race_filter_step(ctx->derivative -
-            ctx->filtered_derivative, RACE_LINE_DERIV_FILTER_DIVISOR);
+            ctx->filtered_derivative, line_deriv_filter_divisor);
         ctx->last_filtered_error = ctx->filtered_error;
         ctx->line_turn = (ctx->filtered_error / line_turn_divisor) +
             (ctx->filtered_derivative / line_kd_divisor);
@@ -416,13 +550,16 @@ static void race_compute_loop_control(race_context_t *ctx,
         if (ctx->line_lost_count < 255U) {
             ctx->line_lost_count++;
         }
-        if (ctx->line_lost_count <= RACE_LINE_LOST_HOLD_CYCLES) {
+        if (ctx->line_lost_count <= line_lost_hold_cycles) {
             ctx->line_turn = ctx->last_turn;
         } else {
             ctx->line_turn = race_move_towards(ctx->last_turn,
                 line_lost_turn_target,
-                (task3_arc_mode != 0U) ? TASK3_ARC_LOST_TURN_DECAY_STEP :
-                    RACE_LINE_LOST_TURN_DECAY_STEP);
+                (task3_arc_mode != 0U) ?
+                    ((task4_task3_profile != 0U) ?
+                        RACE_TASK4_ARC_PROFILE_LOST_TURN_DECAY_STEP :
+                        TASK3_ARC_LOST_TURN_DECAY_STEP) :
+                    line_lost_turn_decay_step);
         }
     }
 
@@ -433,9 +570,11 @@ static void race_compute_loop_control(race_context_t *ctx,
     }
 
     if (config->arc_mode != 0U) {
-        ctx->expected_yaw_cdeg = race_arc_expected_yaw_cdeg(
-            ctx->phase_distance_count,
-            config->phase_turn_dir);
+        ctx->expected_yaw_cdeg = (task4_mode != 0U) ?
+            race_task4_arc_expected_yaw_cdeg(ctx->phase_distance_count,
+                config->phase_turn_dir) :
+            race_arc_expected_yaw_cdeg(ctx->phase_distance_count,
+                config->phase_turn_dir);
     } else {
         ctx->expected_yaw_cdeg = config->straight_target_cdeg;
     }
@@ -444,29 +583,31 @@ static void race_compute_loop_control(race_context_t *ctx,
         if (config->arc_mode == 0U) {
             ctx->heading_error_cdeg =
                 normalize_cdeg(ctx->yaw_cdeg - ctx->expected_yaw_cdeg);
-            if (RACE_STRAIGHT_GYRO_NAV_ENABLE != 0) {
+            if (straight_gyro_nav_enable != 0) {
                 ctx->nav_turn = race_heading_turn_from_error(
                     ctx->heading_error_cdeg,
                     ctx->gyro_z_filtered_mdps,
-                    RACE_STRAIGHT_HEADING_CORR_DIVISOR,
-                    RACE_STRAIGHT_GYRO_DAMP_DIVISOR,
-                    RACE_STRAIGHT_HEADING_CORR_MAX);
+                    straight_heading_corr_divisor,
+                    straight_gyro_damp_divisor,
+                    straight_heading_corr_max);
             }
         } else {
             ctx->arc_actual_yaw_cdeg = ctx->phase_yaw_cdeg;
             ctx->heading_error_cdeg = normalize_cdeg(ctx->arc_actual_yaw_cdeg -
                 ctx->expected_yaw_cdeg);
-            if (RACE_ARC_YAW_NAV_ENABLE != 0) {
+            if (arc_yaw_nav_enable != 0) {
                 ctx->nav_turn = race_heading_turn_from_error(
                     ctx->heading_error_cdeg,
                     ctx->gyro_z_filtered_mdps,
-                    RACE_ARC_YAW_CORR_DIVISOR,
-                    RACE_ARC_GYRO_DAMP_DIVISOR,
-                    RACE_ARC_YAW_CORR_MAX);
+                    arc_yaw_corr_divisor,
+                    arc_gyro_damp_divisor,
+                    arc_yaw_corr_max);
                 if ((task3_arc_mode != 0U) &&
                     (line_sample_usable != 0U)) {
                     ctx->nav_turn = (ctx->nav_turn *
-                        TASK3_ARC_NAV_WITH_LINE_PERCENT) / 100;
+                        ((task4_task3_profile != 0U) ?
+                            RACE_TASK4_ARC_PROFILE_NAV_WITH_LINE_PERCENT :
+                            TASK3_ARC_NAV_WITH_LINE_PERCENT)) / 100;
                 }
             }
         }
@@ -476,30 +617,25 @@ static void race_compute_loop_control(race_context_t *ctx,
         ctx->control_turn = clamp_i32(ctx->line_turn + ctx->nav_turn,
             -arc_control_turn_limit,
             arc_control_turn_limit);
-    } else if ((ctx->nav_ok != 0U) && (RACE_STRAIGHT_GYRO_NAV_ENABLE != 0)) {
+    } else if ((ctx->nav_ok != 0U) && (straight_gyro_nav_enable != 0)) {
         ctx->control_turn = ctx->nav_turn;
-#if RACE_STRAIGHT_IR_ASSIST_ENABLE
-        if (ctx->line_valid != 0U) {
+        if ((straight_ir_assist_enable != 0) && (ctx->line_valid != 0U)) {
             ctx->control_turn = clamp_i32(ctx->control_turn +
-                (ctx->line_turn / RACE_STRAIGHT_IR_ASSIST_DIVISOR),
-                -RACE_LINE_TURN_LIMIT,
-                RACE_LINE_TURN_LIMIT);
+                (ctx->line_turn / straight_ir_assist_divisor),
+                -line_turn_limit,
+                line_turn_limit);
         }
-#endif
     } else {
         ctx->control_turn = ctx->line_turn;
     }
 
     {
-        int32_t max_pwm = (ctx->target_laps == TASK4_LAP_COUNT) ?
-            RACE_TASK4_LINE_MAX_PWM : RACE_LINE_MAX_PWM;
-
         ctx->left_pwm = clamp_i32(ctx->drive.motor_b_pwm + ctx->control_turn,
-        RACE_LINE_MIN_PWM,
-            max_pwm);
+            line_min_pwm,
+            line_max_pwm);
         ctx->right_pwm = clamp_i32(ctx->drive.motor_a_pwm - ctx->control_turn,
-        RACE_LINE_MIN_PWM,
-            max_pwm);
+            line_min_pwm,
+            line_max_pwm);
     }
 }
 
@@ -509,7 +645,37 @@ static void race_compute_loop_control(race_context_t *ctx,
 static uint8_t race_check_phase_point(race_context_t *ctx,
     const race_phase_config_t *config)
 {
-    if ((ctx->target_laps == 1U) && (ctx->phase == 2U)) {
+    if (ctx->target_laps == TASK4_LAP_COUNT) {
+        int32_t total_dis_count = encoder_get_calibration_distance_count();
+        int32_t lap_dis_count = total_dis_count -
+            ctx->lap_start_calibration_count;
+
+        if (ctx->phase == 0U) {
+            int32_t ac_distance_count = total_dis_count -
+                ctx->phase_start_calibration_count;
+
+            /* C 点保留实车标定的第四问专用停车距离。 */
+            ctx->point_ready =
+                (ac_distance_count >= RACE_TASK4_AC_BRAKE_DISTANCE_COUNT) ?
+                1U : 0U;
+        } else if (ctx->phase == 1U) {
+            /* 与第三问 B 点一致：逐圈累计 Dis 达标且灰度已经离开弧线。 */
+            ctx->point_ready = ((lap_dis_count >=
+                RACE_TASK4_B_EXIT_DISTANCE_COUNT) &&
+                (ctx->line_lost_seen != 0U)) ? 1U : 0U;
+        } else if (ctx->phase == 2U) {
+            /* 与第三问 D 点一致：只按逐圈累计 Dis 直接刹停。 */
+            ctx->point_ready = (lap_dis_count >=
+                RACE_TASK4_D_BRAKE_DISTANCE_COUNT) ? 1U : 0U;
+        } else {
+            /* 与第三问 A 点一致：逐圈累计 Dis 达标且灰度已经离开弧线。 */
+            ctx->point_ready = ((lap_dis_count >=
+                RACE_TASK4_A_FINISH_DISTANCE_COUNT) &&
+                (ctx->line_lost_seen != 0U)) ? 1U : 0U;
+        }
+        ctx->straight_point_candidate = ctx->point_ready;
+        ctx->straight_point_count = ctx->point_ready;
+    } else if ((ctx->target_laps == 1U) && (ctx->phase == 2U)) {
         /*
          * 第三问 BD 到 D 点只使用与 OLED Dis 同源的独立累计里程。
          * 到达阈值后立即进入 D 点刹车、停稳和原地定角转向流程。
@@ -576,26 +742,21 @@ static uint8_t race_check_straight_force_turn(const race_context_t *ctx,
     }
     if (ctx->phase == 0U) {
         uint8_t task4_mode = (ctx->target_laps == TASK4_LAP_COUNT) ? 1U : 0U;
-        int32_t force_count = task4_mode ? RACE_TASK4_AC_FORCE_TURN_COUNT :
-            RACE_TASK3_AC_FORCE_TURN_COUNT;
-
-        if ((task4_mode != 0U) && (ctx->lap_count == 0U)) {
-            force_count = RACE_TASK4_FIRST_AC_FORCE_TURN_COUNT;
-        }
-
-        return (ctx->phase_distance_count >= force_count) ? 1U : 0U;
-    }
-    if (ctx->phase == 2U) {
-        if (ctx->target_laps == 1U) {
-            /* 第三问 D 点由累计 Dis 精确触发，禁止旧 BD 强制转向提前抢占。 */
+        if (task4_mode != 0U) {
+            /* 第四问 C 点由专用 Dis 判据负责，不允许旧强制距离抢先入弯。 */
             return 0U;
         }
-
-        uint8_t task4_mode = (ctx->target_laps == TASK4_LAP_COUNT) ? 1U : 0U;
-        int32_t force_count = task4_mode ? RACE_TASK4_BD_FORCE_TURN_COUNT :
-            RACE_BD_FORCE_TURN_COUNT;
-
-        return (ctx->phase_distance_count >= force_count) ? 1U : 0U;
+        return (ctx->phase_distance_count >=
+            RACE_TASK3_AC_FORCE_TURN_COUNT) ? 1U : 0U;
+    }
+    if (ctx->phase == 2U) {
+        if ((ctx->target_laps == 1U) ||
+            (ctx->target_laps == TASK4_LAP_COUNT)) {
+            /* 第三/四问 D 点都由各自累计 Dis 精确触发，禁止旧强制距离抢占。 */
+            return 0U;
+        }
+        return (ctx->phase_distance_count >= RACE_BD_FORCE_TURN_COUNT) ?
+            1U : 0U;
     }
     return 0U;
 }
@@ -672,35 +833,171 @@ static void race_capture_result(race_context_t *ctx, uint8_t reason)
 /**
  * @brief 执行 AC、CB、BD、DA 点位后的转向/前进动作。
  */
+static uint8_t race_task4_capture_c_entry_line(void)
+{
+    ir_tracking_sample_t sample = {0};
+    jy62_navigation_t nav = {0};
+    int32_t yaw_start_cdeg = 0;
+    int32_t gyro_z_filtered_mdps = 0;
+    uint32_t elapsed_ms = 0U;
+    uint8_t ir_ok;
+
+    ir_ok = IRTracking_ReadSample(&sample);
+    if ((ir_ok != 0U) && (sample.line_lost == 0U) &&
+        (sample.active_count >= RACE_IR_TURN_STOP_MIN_COUNT)) {
+        encoder_reset_distance_counts();
+        return 1U;
+    }
+
+    if (race_peek_yaw(&yaw_start_cdeg, &gyro_z_filtered_mdps) == 0U) {
+        TB6612_Brake();
+        return 0U;
+    }
+    (void)gyro_z_filtered_mdps;
+
+    TB6612_SetDifferential(RACE_TASK4_C_LINE_CAPTURE_B_PWM,
+        RACE_TASK4_C_LINE_CAPTURE_A_PWM);
+    while (elapsed_ms < RACE_TASK4_C_LINE_CAPTURE_TIMEOUT_MS) {
+        delay_ms_with_st011(RACE_TASK4_CONTROL_PERIOD_MS);
+        elapsed_ms += RACE_TASK4_CONTROL_PERIOD_MS;
+
+        if (task_uart_stop_requested() != 0U) {
+            break;
+        }
+
+        ir_ok = IRTracking_ReadSample(&sample);
+        if ((ir_ok != 0U) && (sample.line_lost == 0U) &&
+            (sample.active_count >= RACE_IR_TURN_STOP_MIN_COUNT)) {
+            TB6612_Brake();
+            encoder_reset_distance_counts();
+            return 1U;
+        }
+
+        if (JY62_PeekNavigation(&nav) &&
+            (abs_i32(normalize_cdeg(nav.yaw_relative_cdeg - yaw_start_cdeg)) >=
+                RACE_TASK4_C_LINE_CAPTURE_MAX_YAW_CDEG)) {
+            break;
+        }
+    }
+
+    TB6612_Brake();
+    encoder_reset_distance_counts();
+    return 0U;
+}
+
+static uint8_t race_task4_execute_c_entry_like_task3_d(
+    const race_context_t *ctx)
+{
+    uint8_t turn_success;
+    int32_t target_cdeg = normalize_cdeg(ctx->yaw_cdeg +
+        RACE_TASK4_C_ENTRY_TURN_CDEG);
+    const gyro_turn_config_t turn_config = {
+        .tag = "RACE_C_GYRO_ENTRY",
+        .motor_b_pwm = RACE_TASK4_ENTRY_LEFT_TURN_B_PWM,
+        .motor_a_pwm = RACE_TASK4_ENTRY_LEFT_TURN_A_PWM,
+        .slow_motor_b_pwm = RACE_TASK4_ENTRY_LEFT_TURN_SLOW_B_PWM,
+        .slow_motor_a_pwm = RACE_TASK4_ENTRY_LEFT_TURN_SLOW_A_PWM,
+        .yaw_stop_target_cdeg = target_cdeg,
+        .slow_zone_cdeg = RACE_TASK4_ENTRY_TURN_SLOW_ZONE_CDEG,
+        .predictive_stop_enable = 0U,
+        .predictive_stop_ms = 0,
+        .predictive_stop_min_gz_mdps = 0,
+        .control_period_ms = RACE_TASK4_CONTROL_PERIOD_MS
+    };
+
+    /* 与第三问 D 点一致：刹停、保持 OLED、等待车身完全稳定后再定角转向。 */
+    TB6612_Brake();
+    OLED_ShowYawDistanceError(
+        ctx->yaw_cdeg,
+        encoder_get_calibration_distance_count() / COUNTS_PER_CM,
+        (ctx->ir_ok != 0U) ? ctx->sample.error : 0,
+        "C",
+        ctx->line_valid);
+    delay_ms_with_st011(RACE_TASK4_ENTRY_BRAKE_SETTLE_MS);
+
+    turn_success = (RACE_TASK4_C_ENTRY_TURN_CDEG == 0) ? 1U :
+        race_gyro_turn_to_yaw(&turn_config);
+    if (turn_success != 0U) {
+        delay_ms_with_st011(RACE_TASK4_ENTRY_HANDOFF_BRAKE_MS);
+        turn_success = race_task4_capture_c_entry_line();
+    }
+    return turn_success;
+}
+
+static uint8_t race_task4_execute_arc_entry_turn(const race_context_t *ctx,
+    const char *turn_tag,
+    uint8_t turn_left,
+    int32_t turn_cdeg)
+{
+    int32_t target_cdeg = normalize_cdeg(ctx->yaw_cdeg +
+        ((turn_left != 0U) ? turn_cdeg : -turn_cdeg));
+    {
+        uint8_t turn_success;
+        const gyro_turn_config_t turn_config = {
+            .tag = turn_tag,
+            .motor_b_pwm = (turn_left != 0U) ?
+                RACE_TASK4_ENTRY_LEFT_TURN_B_PWM :
+                RACE_TASK4_ENTRY_RIGHT_TURN_B_PWM,
+            .motor_a_pwm = (turn_left != 0U) ?
+                RACE_TASK4_ENTRY_LEFT_TURN_A_PWM :
+                RACE_TASK4_ENTRY_RIGHT_TURN_A_PWM,
+            .slow_motor_b_pwm = (turn_left != 0U) ?
+                RACE_TASK4_ENTRY_LEFT_TURN_SLOW_B_PWM :
+                RACE_TASK4_ENTRY_RIGHT_TURN_SLOW_B_PWM,
+            .slow_motor_a_pwm = (turn_left != 0U) ?
+                RACE_TASK4_ENTRY_LEFT_TURN_SLOW_A_PWM :
+                RACE_TASK4_ENTRY_RIGHT_TURN_SLOW_A_PWM,
+            .yaw_stop_target_cdeg = target_cdeg,
+            .slow_zone_cdeg = RACE_TASK4_ENTRY_TURN_SLOW_ZONE_CDEG,
+            .predictive_stop_enable = 0U,
+            .predictive_stop_ms = 0,
+            .predictive_stop_min_gz_mdps = 0,
+            .control_period_ms = RACE_TASK4_CONTROL_PERIOD_MS
+        };
+
+        TB6612_Brake();
+        OLED_ShowYawDistanceError(
+            ctx->yaw_cdeg,
+            encoder_get_calibration_distance_count() / COUNTS_PER_CM,
+            (ctx->ir_ok != 0U) ? ctx->sample.error : 0,
+            (turn_left != 0U) ? "C" : "D",
+            ctx->line_valid);
+        delay_ms_with_st011(RACE_TASK4_ENTRY_BRAKE_SETTLE_MS);
+
+        turn_success = race_gyro_turn_to_yaw(&turn_config);
+        if (turn_success != 0U) {
+            /* 复制第三问 D→DA 的短刹车交接时序，再启动第四问圆弧循迹。 */
+            delay_ms_with_st011(RACE_TASK4_ENTRY_HANDOFF_BRAKE_MS);
+        }
+        return turn_success;
+    }
+}
+
 static uint8_t race_execute_point_action(const race_context_t *ctx)
 {
     uint8_t turn_success = 1U;
 
     if (ctx->phase == 0U) {
         uint8_t task4_mode = (ctx->target_laps == TASK4_LAP_COUNT) ? 1U : 0U;
+        if (task4_mode != 0U) {
+            return race_task4_execute_c_entry_like_task3_d(ctx);
+        }
         const sensor_fast_turn_config_t turn_config = {
             .tag = "RACE_C_LEFT_TURN",
-            .motor_b_pwm = task4_mode ?
-                RACE_TASK4_ENTRY_LEFT_TURN_B_PWM : RACE_LEFT_TURN_B_PWM,
-            .motor_a_pwm = task4_mode ?
-                RACE_TASK4_ENTRY_LEFT_TURN_A_PWM : RACE_LEFT_TURN_A_PWM,
-            .slow_motor_b_pwm = task4_mode ?
-                RACE_TASK4_ENTRY_LEFT_TURN_SLOW_B_PWM : RACE_LEFT_TURN_SLOW_B_PWM,
-            .slow_motor_a_pwm = task4_mode ?
-                RACE_TASK4_ENTRY_LEFT_TURN_SLOW_A_PWM : RACE_LEFT_TURN_SLOW_A_PWM,
+            .motor_b_pwm = RACE_LEFT_TURN_B_PWM,
+            .motor_a_pwm = RACE_LEFT_TURN_A_PWM,
+            .slow_motor_b_pwm = RACE_LEFT_TURN_SLOW_B_PWM,
+            .slow_motor_a_pwm = RACE_LEFT_TURN_SLOW_A_PWM,
             .stop_mask = RACE_IR_CENTER_4_MASK,
             .forbid_mask = RACE_IR_CENTER_4_FORBID_MASK,
             .stop_error_max = RACE_TURN_CENTER6_ERROR_MAX,
-            .line_stop_min_yaw_cdeg = task4_mode ? 0 :
-                TASK3_C_TURN_LINE_STOP_MIN_YAW_CDEG,
+            .line_stop_min_yaw_cdeg = TASK3_C_TURN_LINE_STOP_MIN_YAW_CDEG,
             .yaw_stop_enable = 0U,
             .yaw_stop_target_cdeg = 0,
-            .control_period_ms = task4_mode ?
-                RACE_TASK4_CONTROL_PERIOD_MS : CONTROL_PERIOD_MS
+            .control_period_ms = CONTROL_PERIOD_MS
         };
         turn_success = race_advance_after_point("RACE_C_ADVANCE",
-            task4_mode ? RACE_TASK4_POINT_ADVANCE_COUNT :
-                RACE_POINT_ADVANCE_COUNT);
+            RACE_POINT_ADVANCE_COUNT);
         if (turn_success != 0U) {
             turn_success = race_sensor_fast_turn(&turn_config);
         }
@@ -730,9 +1027,8 @@ static uint8_t race_execute_point_action(const race_context_t *ctx)
          * 否则车辆会短暂朝 A 点行驶。任务四仍保留其带航向保持的前推。
          */
         if (task4_mode != 0U) {
-            turn_success = race_advance_after_point_with_heading("RACE_B_ADVANCE",
-                RACE_ARC_POINT_ADVANCE_COUNT,
-                RACE_TASK4_B_ADVANCE_HEADING_TARGET_CDEG);
+            TB6612_Brake();
+            turn_success = 1U;
         } else {
             /* 第三问 B 点一经检测，直接满 PWM 主动刹车后立即转向，无固定等待。 */
             TB6612_Brake();
@@ -744,25 +1040,10 @@ static uint8_t race_execute_point_action(const race_context_t *ctx)
     } else if (ctx->phase == 2U) {
         uint8_t task4_mode = (ctx->target_laps == TASK4_LAP_COUNT) ? 1U : 0U;
         if (task4_mode != 0U) {
-            const sensor_fast_turn_config_t turn_config = {
-                .tag = "RACE_D_RIGHT_TURN",
-                .motor_b_pwm = RACE_TASK4_ENTRY_RIGHT_TURN_B_PWM,
-                .motor_a_pwm = RACE_TASK4_ENTRY_RIGHT_TURN_A_PWM,
-                .slow_motor_b_pwm = RACE_TASK4_ENTRY_RIGHT_TURN_SLOW_B_PWM,
-                .slow_motor_a_pwm = RACE_TASK4_ENTRY_RIGHT_TURN_SLOW_A_PWM,
-                .stop_mask = RACE_IR_CENTER_4_MASK,
-                .forbid_mask = RACE_IR_CENTER_4_FORBID_MASK,
-                .stop_error_max = RACE_TURN_CENTER6_ERROR_MAX,
-                .line_stop_min_yaw_cdeg = 0,
-                .yaw_stop_enable = 0U,
-                .yaw_stop_target_cdeg = 0,
-                .control_period_ms = RACE_TASK4_CONTROL_PERIOD_MS
-            };
-            turn_success = race_advance_after_point("RACE_D_ADVANCE",
-                RACE_TASK4_POINT_ADVANCE_COUNT);
-            if (turn_success != 0U) {
-                turn_success = race_sensor_fast_turn(&turn_config);
-            }
+            return race_task4_execute_arc_entry_turn(ctx,
+                "RACE_D_GYRO_ENTRY",
+                0U,
+                RACE_TASK4_D_ENTRY_TURN_CDEG);
         } else {
             int32_t target_cdeg = normalize_cdeg(ctx->yaw_cdeg -
                 TASK3_D_GYRO_ENTRY_TURN_CDEG);
@@ -807,12 +1088,9 @@ static uint8_t race_execute_point_action(const race_context_t *ctx)
                 RACE_TASK4_EXIT_TURN_PREDICT_MIN_GZ_MDPS,
             .control_period_ms = RACE_TASK4_CONTROL_PERIOD_MS
         };
-        turn_success = race_advance_after_point_with_heading("RACE_A_ADVANCE",
-            RACE_ARC_POINT_ADVANCE_COUNT,
-            RACE_TASK4_A_ADVANCE_HEADING_TARGET_CDEG);
-        if (turn_success != 0U) {
-            turn_success = race_gyro_turn_to_yaw(&turn_config);
-        }
+        TB6612_Brake();
+        delay_ms_with_st011(RACE_POINT_SETTLE_MS);
+        turn_success = race_gyro_turn_to_yaw(&turn_config);
     }
 
     return turn_success;
@@ -908,7 +1186,8 @@ static void race_reset_segment_control(race_context_t *ctx)
     ctx->line_lost_count = 0U;
     ctx->line_control_seeded = 0U;
     ctx->report_elapsed_ms = 0;
-    race_diff_pid_reset(&ctx->diff_pid);
+    race_diff_pid_reset(&ctx->diff_pid,
+        (ctx->target_laps == TASK4_LAP_COUNT) ? 1U : 0U);
 }
 
 /**
@@ -923,11 +1202,15 @@ static void race_advance_segment(race_context_t *ctx, uint8_t point_event)
             return;
         }
         ctx->phase = 0U;
+        ctx->lap_start_calibration_count =
+            encoder_get_calibration_distance_count();
     } else {
         ctx->phase++;
     }
 
     ctx->phase_start_ms = ctx->elapsed_ms;
+    ctx->phase_start_calibration_count =
+        encoder_get_calibration_distance_count();
 
     if (point_event != 0U) {
         ctx->phase_start_count = 0;
@@ -1069,8 +1352,10 @@ static void race_init_lap_context(race_context_t *ctx, uint8_t target_laps)
      * 后续各段和转向动作可以复位工作编码器，但该累计值会自动保留。
      */
     encoder_reset_calibration_distance_count();
+    ctx->phase_start_calibration_count = 0;
+    ctx->lap_start_calibration_count = 0;
     encoder_enable_interrupts();
-    race_diff_pid_reset(&ctx->diff_pid);
+    race_diff_pid_reset(&ctx->diff_pid, task4_mode);
     race_read_navigation_state(ctx, 1U);
 
     {
