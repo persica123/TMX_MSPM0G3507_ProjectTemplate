@@ -806,12 +806,11 @@ static void race_task4_configure_phase(const race_context_t *ctx,
 static uint8_t race_task4_check_phase_point(race_context_t *ctx,
     const race_phase_config_t *config)
 {
-    int32_t lap_distance_count = encoder_get_calibration_distance_count() -
-        ctx->lap_start_calibration_count;
+    (void)config;
 
     if (ctx->phase == 0U) {
         ctx->straight_point_candidate =
-            ((ctx->phase_distance_count >= config->point_arm_count) &&
+            ((ctx->phase_distance_count >= RACE_TASK4_AC_DISTANCE_COUNT) &&
              (ctx->line_valid != 0U)) ? 1U : 0U;
         if (ctx->straight_point_candidate != 0U) {
             if (ctx->straight_point_count < 1U) {
@@ -822,8 +821,8 @@ static uint8_t race_task4_check_phase_point(race_context_t *ctx,
         }
         ctx->point_ready = (ctx->straight_point_count >= 1U) ? 1U : 0U;
     } else if (ctx->phase == 1U) {
-        ctx->straight_point_candidate = ((lap_distance_count >=
-                RACE_TASK4_B_EXIT_DISTANCE_COUNT) &&
+        ctx->straight_point_candidate = ((ctx->phase_distance_count >=
+                RACE_TASK4_BC_DISTANCE_COUNT) &&
             (ctx->line_lost_seen != 0U)) ? 1U : 0U;
         if (ctx->straight_point_candidate != 0U) {
             if (ctx->straight_point_count < 255U) {
@@ -835,11 +834,11 @@ static uint8_t race_task4_check_phase_point(race_context_t *ctx,
         ctx->point_ready = (ctx->straight_point_count >=
             RACE_TASK4_B_LINE_LOST_CONFIRM_CYCLES) ? 1U : 0U;
     } else if (ctx->phase == 2U) {
-        ctx->point_ready = (lap_distance_count >=
-            RACE_TASK4_D_BRAKE_DISTANCE_COUNT) ? 1U : 0U;
+        ctx->point_ready = (ctx->phase_distance_count >=
+            RACE_TASK4_BD_DISTANCE_COUNT) ? 1U : 0U;
     } else {
-        ctx->point_ready = ((lap_distance_count >=
-                RACE_TASK4_A_FINISH_DISTANCE_COUNT) &&
+        ctx->point_ready = ((ctx->phase_distance_count >=
+                RACE_TASK4_DA_DISTANCE_COUNT) &&
             (ctx->line_lost_seen != 0U)) ? 1U : 0U;
     }
 
@@ -1166,8 +1165,7 @@ static uint8_t race_task4_execute_point_action(const race_context_t *ctx)
         };
         TB6612_Brake();
         OLED_ShowYawDistanceError(ctx->yaw_cdeg,
-            (encoder_get_calibration_distance_count() -
-                ctx->lap_start_calibration_count) / COUNTS_PER_CM,
+            ctx->phase_distance_count / COUNTS_PER_CM,
             (ctx->ir_ok != 0U) ? ctx->sample.error : 0,
             "T4_D",
             ctx->line_valid);
@@ -1250,7 +1248,7 @@ static void race_task4_reset_segment_control(race_context_t *ctx)
 }
 
 /*
- * 每圈 A 点结束事件专用距离复位。
+ * 每圈 A 点原地转向完成事件专用距离复位。
  * 同时清除工作编码器、OLED/判据使用的累计 Dis 以及上下文内所有距离基准。
  */
 static void race_task4_reset_lap_distance_state(race_context_t *ctx)
@@ -1278,12 +1276,8 @@ static void race_task4_advance_segment(race_context_t *ctx,
             return;
         }
         ctx->phase = 0U;
-        /*
-         * 距离已经在 A 点停止状态触发时清零；这里不再二次清零，
-         * 只把 A->AC 转向产生的计数设为下一圈的扣除基准。
-         */
-        ctx->lap_start_calibration_count =
-            encoder_get_calibration_distance_count();
+        /* A 点转向完成后已经统一清零，下一圈 AC 直接从 0 开始。 */
+        ctx->lap_start_calibration_count = 0;
     } else {
         ctx->phase++;
     }
@@ -1376,12 +1370,8 @@ static void run_task4_laps(void)
 
         race_update_loop_state(&ctx, &phase_config);
         if (oled_elapsed_ms >= OLED_REFRESH_MIN_MS) {
-            int32_t lap_distance_count =
-                encoder_get_calibration_distance_count() -
-                ctx.lap_start_calibration_count;
-
             OLED_ShowYawDistanceError(ctx.yaw_cdeg,
-                lap_distance_count / COUNTS_PER_CM,
+                ctx.phase_distance_count / COUNTS_PER_CM,
                 (ctx.ir_ok != 0U) ? ctx.sample.error : 0,
                 phase_config.phase_name,
                 ctx.line_valid);
@@ -1403,14 +1393,14 @@ static void run_task4_laps(void)
         if (race_task4_check_phase_point(&ctx, &phase_config) != 0U) {
             race_capture_result(&ctx, 1U);
             race_task4_log_point_state(&ctx, &phase_config, 1U, 1U);
-            if (ctx.phase == 3U) {
-                /* DA 到 A 的每圈最终停止状态，是唯一的整圈距离清零触发源。 */
-                TB6612_Brake();
-                race_task4_reset_lap_distance_state(&ctx);
-            }
             if (race_task4_execute_point_action(&ctx) == 0U) {
                 ctx.stop_reason = 2U;
                 break;
+            }
+            if (ctx.phase == 3U) {
+                /* DA 到 A 后先完成原地转向，再清零整圈距离和所有距离基准。 */
+                TB6612_Brake();
+                race_task4_reset_lap_distance_state(&ctx);
             }
             race_task4_advance_segment(&ctx, 1U);
             if (ctx.stop_reason != 0U) {
