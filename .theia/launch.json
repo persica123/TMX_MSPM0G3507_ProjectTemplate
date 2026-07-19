@@ -2,12 +2,12 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "TMX_MSPM0G3507_ProjectTemplate",
+            "name": "TMX_MSPM0G3507_ProjectTemplate_source_backup_20260715_231516",
             "type": "ccs-debug",
             "request": "launch",
             "projectInfo": {
-                "name": "TMX_MSPM0G3507_ProjectTemplate",
-                "resourceId": "/TMX_MSPM0G3507_ProjectTemplate"
+                "name": "TMX_MSPM0G3507_ProjectTemplate_source_backup_20260715_231516",
+                "resourceId": "/TMX_MSPM0G3507_ProjectTemplate_source_backup_20260715_231516"
             },
             "debuggerSettings": {
                 "targetConfigs/MSPM0G3507.ccxml": {

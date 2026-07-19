@@ -19,6 +19,7 @@
 #include "tasks/question1_only.h"
 #include "tasks/question2_only.h"
 #include "tasks/question3_only.h"
+#include "tasks/question4_only.h"
 
 static task_id_t single_test_selected_task(void)
 {
@@ -28,6 +29,8 @@ static task_id_t single_test_selected_task(void)
     return TASK_ID_2;
 #elif APP_SINGLE_TEST_TASK_ID == 3U
     return TASK_ID_3;
+#elif APP_SINGLE_TEST_TASK_ID == 4U
+    return TASK_ID_4;
 #else
     return TASK_ID_NONE;
 #endif
@@ -51,8 +54,10 @@ static uint8_t run_single_task_test_if_enabled(void)
         run_question1_only_test();
     } else if (task_id == TASK_ID_2) {
         run_question2_only_test();
-    } else {
+    } else if (task_id == TASK_ID_3) {
         run_question3_only_test();
+    } else {
+        run_question4_only_test();
     }
 
     TB6612_Brake();

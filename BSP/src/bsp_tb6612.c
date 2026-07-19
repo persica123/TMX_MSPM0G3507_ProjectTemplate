@@ -123,6 +123,30 @@ void TB6612_Brake(void)
 }
 
 /**
+ * @brief 使用可调 PWM 对两个电机通道执行主动刹车。
+ *
+ * PWM 越接近 TB6612_PWM_MAX，主动刹车占空比越高；PWM 越小，
+ * 一个周期内滑行所占比例越大。B 为左轮，A 为右轮。
+ */
+void TB6612_BrakePwm(uint16_t motor_b_pwm, uint16_t motor_a_pwm)
+{
+#if APP_MOTOR_OUTPUT_ENABLE == 0
+    (void)motor_b_pwm;
+    (void)motor_a_pwm;
+    TB6612_Disable();
+    return;
+#endif
+    TB6612_SetPwm(TB6612_MOTOR_A, motor_a_pwm);
+    TB6612_SetPwm(TB6612_MOTOR_B, motor_b_pwm);
+
+    AIN1_OUT(1);
+    AIN2_OUT(1);
+    BIN1_OUT(1);
+    BIN2_OUT(1);
+    TB6612_Enable();
+}
+
+/**
  * @brief 让两个电机通道滑行。
  */
 void TB6612_Coast(void)

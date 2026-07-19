@@ -8,8 +8,9 @@
  * 1: run question 1 only, A -> B.
  * 2: run question 2 only, A -> B -> C -> D -> A.
  * 3: run question 3 only, A -> C -> B -> D -> A, one lap.
+ * 4: run question 4 only, A -> C -> B -> D -> A, four laps.
  */
-#define APP_SINGLE_TEST_TASK_ID 3U
+#define APP_SINGLE_TEST_TASK_ID 4U
 
 /* Delay before an auto-started single-task test, leaving time to place the car. */
 #define APP_SINGLE_TEST_START_DELAY_MS 3000U

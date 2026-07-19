@@ -63,6 +63,7 @@ typedef struct {
     int16_t slow_motor_b_pwm;
     int16_t slow_motor_a_pwm;
     int32_t yaw_stop_target_cdeg;
+    int32_t slow_zone_cdeg;
     uint8_t predictive_stop_enable;
     int32_t predictive_stop_ms;
     int32_t predictive_stop_min_gz_mdps;
@@ -169,10 +170,11 @@ static void jy62_update_oled_once(void)
 #endif
 }
 
-static void race_diff_pid_reset(straight_pid_t *pid);
+static void race_diff_pid_reset(straight_pid_t *pid, uint8_t task4_mode);
 static void race_drive_config(straight_drive_config_t *config,
     int32_t base_pwm,
-    int32_t target_speed_diff);
+    int32_t target_speed_diff,
+    uint8_t task4_mode);
 static uint8_t run_task2_cd_exit_angle_straight(const char *tag);
 static int32_t race_heading_turn_from_error(int32_t heading_error_cdeg,
     int32_t gyro_z_filtered_mdps,
